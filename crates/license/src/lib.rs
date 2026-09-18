@@ -37,7 +37,7 @@ pub use trial::{ensure_trial_status, TrialStatus, TRIAL_DAYS};
 /// trust anchor (#12). The matching private seed is held offline by the
 /// issuer (签发方) and injected into the tech-site signer via the
 /// `DBMASTER_SERVER_LICENSE_PRIVATE_KEY` env var; it is NEVER in this repo,
-/// never in tests, never in logs. See `docs/license-key-rotation.md`.
+/// never in tests, never in logs.
 ///
 /// **Tests are decoupled from this constant.** Unit tests sign + verify with a
 /// fixed dev keypair via [`verify_license_with_pk`] (see `TEST_DEV_SEED`),
@@ -979,7 +979,7 @@ mod tests {
         let dev_pubkey_hex = hex::encode(dev_verifying_key().to_bytes());
         assert_ne!(
             SERVER_PUBLIC_KEY_HEX, dev_pubkey_hex,
-            "SERVER_PUBLIC_KEY_HEX must NOT be the DEV/test key — rotate to a production keypair (docs/license-key-rotation.md)"
+            "SERVER_PUBLIC_KEY_HEX must NOT be the DEV/test key — rotate to a production keypair"
         );
     }
 }

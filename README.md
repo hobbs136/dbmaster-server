@@ -16,15 +16,15 @@ Your 2–5 person team manages PostgreSQL, MySQL, Redis, and MongoDB. Nobody is 
 
 | Capability | What you get | Where |
 |---|---|---|
-| Scheduled data sync | Paginated, retryable, time-batched ETL between databases; cron scheduling; cancellable runs | `crates/data_sync` · [docs/data_sync.md](docs/data_sync.md) |
-| Schema drift detection | Snapshot → collect → diff → notify pipeline with webhook alerts; source access is read-only, enforced by canary probes | `crates/drift` · [ADR-0002](docs/adr/0002-schema-drift-alert-v1.md) |
-| Health checks | Connectivity + metric probes (missing indexes, table bloat, connection count) with threshold alerting | `crates/health_check` · [ADR-0004](docs/adr/0004-health-check-engine.md) |
-| Slow query statistics & weekly reports | Gateway sampling plus native slow-log / performance-schema collection; 14-day detail + weekly aggregation | migrations 016–019 · [ADR-0007](docs/adr/0007-report-ai-analysis-client-side.md) |
+| Scheduled data sync | Paginated, retryable, time-batched ETL between databases; cron scheduling; cancellable runs | `crates/data_sync` |
+| Schema drift detection | Snapshot → collect → diff → notify pipeline with webhook alerts; source access is read-only, enforced by canary probes | `crates/drift` |
+| Health checks | Connectivity + metric probes (missing indexes, table bloat, connection count) with threshold alerting | `crates/health_check` |
+| Slow query statistics & weekly reports | Gateway sampling plus native slow-log / performance-schema collection; 14-day detail + weekly aggregation | migrations 016–019 |
 | Team collaboration | Users & JWT auth, workspaces, DDL approval workflow (approve → async execute), credential vault (AES-256-GCM at rest) | `crates/core` · `crates/automation` |
-| DB gateway API | `/api/gw/*` metadata + SSE streaming query execution, cancel/timeout with server-side termination, SSH tunneling, TLS pass-through | `crates/gateway` · [ADR-0005](docs/adr/0005-single-db-capability-layer.md) |
+| DB gateway API | `/api/gw/*` metadata + SSE streaming query execution, cancel/timeout with server-side termination, SSH tunneling, TLS pass-through | `crates/gateway` |
 | MCP surface for AI agents | Read-only tools plus approval-gated writes over Streamable HTTP | `crates/mcp` |
-| License & entitlement | Offline Ed25519 license verification, 14-day trial, runtime entitlement swap | `crates/license` · [ADR-0001](docs/adr/0001-server-license-activation.md) |
-| Notifications | Webhook delivery (Slack-compatible) with a retry schedule; `https://`-only outside dev mode | [docs/webhook-drift-event-v1.md](docs/webhook-drift-event-v1.md) |
+| License & entitlement | Offline Ed25519 license verification, 14-day trial, runtime entitlement swap | `crates/license` |
+| Notifications | Webhook delivery (Slack-compatible) with a retry schedule; `https://`-only outside dev mode | `crates/drift` · `crates/health_check` |
 
 The whole stack is pure Rust — sqlx (MySQL/PostgreSQL/SQLite), tiberius (SQL Server), redis, reqwest with rustls — so there is no OpenSSL/pkg-config setup anywhere, and cross-compiling needs only a linker.
 
@@ -57,7 +57,7 @@ The whole stack is pure Rust — sqlx (MySQL/PostgreSQL/SQLite), tiberius (SQL S
 
 - **Desktop client** ([github.com/hobbs136/dbmaster](https://github.com/hobbs136/dbmaster)) works fully offline with direct database connections.
 - **Server** adds automation, monitoring, and team features when connected (client → Settings → Team Server).
-- **Embedded mode**: the same binary can be spawned by the desktop client as a local child process (`--embedded`) for a free single-user local setup — one codebase, two run modes. See [ADR-0003](docs/adr/0003-embedded-server-architecture.md).
+- **Embedded mode**: the same binary can be spawned by the desktop client as a local child process (`--embedded`) for a free single-user local setup — one codebase, two run modes.
 
 ---
 
@@ -167,9 +167,9 @@ All dependencies are pure-Rust (sqlx with `runtime-tokio` + `sqlite`, no OpenSSL
 | `SERVER_JWT_REFRESH_SECRET` | dev-only default | HS256 secret for refresh tokens — **set in production, must differ** |
 | `DATABASE_URL` | `sqlite:dbmaster.db?mode=rwc` | SQLite path (`sqlite::memory:` for tests) |
 | `RUST_LOG` | `dbmaster_server=info` | Log filter |
-| `DBMASTER_CREDENTIAL_KEY` | none (dev: random per-boot) | 32-byte AES-256-GCM master key (hex) encrypting stored DB credentials — **required in production** (server fails fast if unset). See [ADR-0001](docs/adr/0001-server-license-activation.md). |
+| `DBMASTER_CREDENTIAL_KEY` | none (dev: random per-boot) | 32-byte AES-256-GCM master key (hex) encrypting stored DB credentials — **required in production** (server fails fast if unset). |
 | `DBMASTER_DRIFT_DEFAULT_INTERVAL_MINS` | `30` | Default per-task drift-watch scan interval in minutes. Each task may override via its `config.interval_minutes`. Clamped to `1..=1440` (1 minute to 24 hours); out-of-range or unparseable values fall back to the default with a WARN log. |
-| `DBMASTER_DRIFT_WEBHOOK_TIMEOUT_SECS` | `10` | Per-HTTP-request timeout for drift webhook delivery. Each delivery still receives the full retry schedule (see [docs/webhook-drift-event-v1.md](docs/webhook-drift-event-v1.md)). |
+| `DBMASTER_DRIFT_WEBHOOK_TIMEOUT_SECS` | `10` | Per-HTTP-request timeout for drift webhook delivery. Each delivery still receives the full retry schedule. |
 | `DBMASTER_DEV` | unset | Set to `1` to enable dev mode, which permits `http://localhost` / `http://127.0.0.1` / `http://[::1]` webhook URLs (loopback only). Production mode refuses any non-`https://` URL — payload must never traverse a plaintext link. |
 | `DBMASTER_MCP_RATE_LIMIT_PER_MIN` | `120` | MCP `/mcp` per-user rate limit (requests per minute, sliding window). Agents issue one HTTP request per tool call, so this is higher than the auth endpoints' 5/min-per-IP. Clamped to `1..=10000` — a typo can't disable rate limiting. |
 | `DBMASTER_MCP_READ_QUERY_MAX_ROWS` | `10000` | Ceiling for the `read_query` MCP tool's per-call `max_rows` (per-call default 500). Matches the REST gateway row cap so both entry points share the same blast radius. Clamped `1..=100000`. |
@@ -206,7 +206,7 @@ All dependencies are pure-Rust (sqlx with `runtime-tokio` + `sqlite`, no OpenSSL
 
 ## DB gateway API v1
 
-`/api/gw/*` — the migration foundation for the thin-client architecture ([ADR-0005](docs/adr/0005-single-db-capability-layer.md) §2.2). Bearer access token; per-user rate limit `DBMASTER_GW_RATE_LIMIT_PER_MIN`. Supported `dbType`s: `mysql`, `doris`, `postgres`/`postgresql`/`pg`, `sqlite`, `sqlserver`/`mssql` (full path: register/test, tree, SSE execution, cancel/timeout with server-side termination), and `clickhouse` (metadata only; execution lands with the thin-adapter). SQL Server connects via tiberius (pure-Rust TDS, TLS-encrypted by default — see `DBMASTER_MSSQL_TRUST_SERVER_CERT`); `dbo` is the schema scope (same trade-off as PostgreSQL's `public`-only; schema pass-through is a planned follow-up):
+`/api/gw/*` — the migration foundation for the thin-client architecture. Bearer access token; per-user rate limit `DBMASTER_GW_RATE_LIMIT_PER_MIN`. Supported `dbType`s: `mysql`, `doris`, `postgres`/`postgresql`/`pg`, `sqlite`, `sqlserver`/`mssql` (full path: register/test, tree, SSE execution, cancel/timeout with server-side termination), and `clickhouse` (metadata only; execution lands with the thin-adapter). SQL Server connects via tiberius (pure-Rust TDS, TLS-encrypted by default — see `DBMASTER_MSSQL_TRUST_SERVER_CERT`); `dbo` is the schema scope (same trade-off as PostgreSQL's `public`-only; schema pass-through is a planned follow-up):
 
 - `GET /api/gw/connections` — connection safe projection (never host/credentials)
 - `GET /api/gw/connections/{id}/databases` · `…/tables?db=` · `…/describe?db=&table=` — metadata, same backend as the MCP tools
@@ -231,7 +231,7 @@ The server exposes an MCP (Model Context Protocol) surface at **`POST /mcp`** (S
 
 Read-only tools: `list_connections` → `list_databases` → `list_tables` → `describe_table`, plus `read_query` (SELECT-only, fail-closed risk gate, row limit + statement timeout). Write path (approval-gated): `submit_write` → human approves in the desktop client (`/api/approvals`) → `execute_write` (approved-only, idempotent) / `get_approval`. Approving in the client claims and executes the DDL immediately — `execute_write` then acts as an idempotent trigger/observer for approvals that reach `approved` without executing; repeated calls never re-run a finished approval.
 
-**License gating**: on a `Gated` instance (trial expired / no valid license), `submit_write` and `execute_write` return `ENTITLEMENT_GATED` (static text, points to activation) while sessions, all read tools and `get_approval` keep working — visible-but-locked, same philosophy as the automation gates ([ADR-0002](docs/adr/0002-schema-drift-alert-v1.md) v1-C-2). Embedded mode synthesizes a lifetime `Licensed` entitlement, so the free local tier is fully unaffected; `Trial` and `Licensed` instances are not gated. The gate reads the runtime entitlement (same ArcSwap as `POST /api/license`), so activating mid-session unlocks write tools without reconnecting the agent.
+**License gating**: on a `Gated` instance (trial expired / no valid license), `submit_write` and `execute_write` return `ENTITLEMENT_GATED` (static text, points to activation) while sessions, all read tools and `get_approval` keep working — visible-but-locked, same philosophy as the automation gates. Embedded mode synthesizes a lifetime `Licensed` entitlement, so the free local tier is fully unaffected; `Trial` and `Licensed` instances are not gated. The gate reads the runtime entitlement (same ArcSwap as `POST /api/license`), so activating mid-session unlocks write tools without reconnecting the agent.
 
 **Client samples** (replace `<host>` / `<port>` and the token):
 
@@ -288,7 +288,7 @@ Cumulative-counter source (snapshot-diff state machine — one row per digest **
 - Rows go through the same digest normalization and retention as gateway samples; `sql_text` truncates at 8192 chars.
 - **Not yet** (per-source prerequisites make real-world yield low; revisit on demand): PostgreSQL `pg_stat_statements` (needs `shared_preload_libraries` + restart), ClickHouse `system.query_log`, SQL Server Query Store (off by default).
 
-Weekly-report AI analysis is client-side by design — see [ADR-0007](docs/adr/0007-report-ai-analysis-client-side.md) (the server keeps zero AI outbound surface; the desktop report viewer hands the typed weekly content to the existing AI panel with the user's own provider/key).
+Weekly-report AI analysis is client-side by design — the server keeps zero AI outbound surface; the desktop report viewer hands the typed weekly content to the existing AI panel with the user's own provider/key.
 
 ---
 
@@ -331,7 +331,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA pg_catalog TO dbmaster;
 
   If the probe **succeeds** (the account can write), the server refuses to save the connection. The probe SQL touches no business rows and leaves no persistent footprint. As defence in depth, the runner repeats the same canary on each drift run — if a privilege escalation between create-time and run-time is detected, the run is aborted and the failure is recorded in `task_run_history`.
 
-The canary and metadata-only SQL paths enforce the [ADR-0002](docs/adr/0002-schema-drift-alert-v1.md) §4.2.3 read-only contract. If the canary reports the account as writable, redo the GRANTs above before re-saving the connection.
+The canary and metadata-only SQL paths enforce the read-only contract. If the canary reports the account as writable, redo the GRANTs above before re-saving the connection.
 
 ### Health check account
 
@@ -354,25 +354,6 @@ If neither grant is present, the connection-count metric is skipped (recorded as
 **PostgreSQL** — no extra grants beyond drift watch. `pg_stat_user_tables` and `pg_stat_activity` are readable by `PUBLIC` by default; `pg_tables` is a system catalog view (default read).
 
 **Other db types** (Doris / SQL Server / SQLite / MongoDB / Redis / Oracle) — health check degrades to connectivity-only. Full metric support for these is a follow-up.
-
----
-
-## Documentation
-
-Architecture decision records ([docs/adr/](docs/adr/)):
-
-| ADR | Topic |
-|---|---|
-| [ADR-0001](docs/adr/0001-server-license-activation.md) | Server license system (signing / 14-day trial / activation API / credential vault) |
-| [ADR-0002](docs/adr/0002-schema-drift-alert-v1.md) | Schema-drift alert v1 (read-only contract, canary, webhook) |
-| [ADR-0003](docs/adr/0003-embedded-server-architecture.md) | Embedded-server mode (`--embedded`) |
-| [ADR-0004](docs/adr/0004-health-check-engine.md) | Health-check engine |
-| [ADR-0005](docs/adr/0005-single-db-capability-layer.md) | Single-DB capability layer (gateway / MCP = thin wrappers) |
-| [ADR-0006](docs/adr/0006-nosql-gateway-semantics.md) | NoSQL gateway semantics |
-| [ADR-0007](docs/adr/0007-report-ai-analysis-client-side.md) | Weekly-report AI analysis on the client side |
-| [ADR-0008](docs/adr/0008-opensource-agpl-migration.md) | Open-source migration (AGPL-3.0-only) |
-
-Further docs: [docs/data_sync.md](docs/data_sync.md) · [docs/webhook-drift-event-v1.md](docs/webhook-drift-event-v1.md) · [docs/webhook-health-event-v1.md](docs/webhook-health-event-v1.md) · [docs/license-key-rotation.md](docs/license-key-rotation.md)
 
 ---
 

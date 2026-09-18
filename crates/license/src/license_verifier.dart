@@ -33,7 +33,6 @@ class LicenseVerifier {
 
   /// 内置公钥（真实密钥对，2026-07-19 `dart run bin/license_signer.dart keygen`
   /// 生成）。私钥只保存在签发方机器（private_key.hex，已 gitignore），禁止入库。
-  /// 换密钥时同步更新 docs/commerce/free_pro_gating.md §5.1 记录。
   static const String embeddedPublicKeyHex =
       '5041f821e42c930606ca3e36449f31b574fe4f84514fffffa31ba6a05cc3865a';
 
