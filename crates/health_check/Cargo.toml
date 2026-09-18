@@ -1,0 +1,33 @@
+[package]
+name = "dbmaster-health-check"
+version.workspace = true
+edition.workspace = true
+description = "DbMaster Server health-check engine — scheduled DB connectivity/metric monitoring with threshold-based alerting"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Depends on core (AppState/Config/HealthCheckRunner trait) and automation
+# (credential decrypt + gate_blocked) so the runner can resolve a stored
+# source connection and collect health metrics. Mirrors drift/data_sync.
+dbmaster-core = { path = "../core" }
+dbmaster-automation = { path = "../automation" }
+dbmaster-license = { path = "../license" }
+# sqlx opens customer source pools (mysql+postgres pure-Rust drivers) and
+# writes health_check_results / health_alert_state rows to the local SQLite
+# control DB.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "mysql", "postgres"] }
+# cron expression parsing for the scheduler (scheduled_tasks.cron_expr).
+cron = "0.12"
+# impl dbmaster_core::server::HealthCheckRunner for the manual-run bridge.
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+tracing = "0.1"
+anyhow = "1"
+thiserror = "1"
+# webhook delivery (dbmaster.health-event.v1) — mirrors drift/data_sync notify.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

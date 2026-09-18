@@ -1,0 +1,38 @@
+{
+  "_comment_0": "DEV/TEST ONLY — dbmaster Server license golden fixture.",
+  "_comment_1": "Byte-level contract shared between:",
+  "_comment_2": "  - dbmaster-tech-site (Go) signLicense  -> produces canonical + signature",
+  "_comment_3": "  - dbmaster-server/crates/license (Rust) verify_license -> verifies signature",
+  "_comment_4": "Each side reads this file and asserts its own output is byte-identical.",
+  "_comment_5": "Drift = test failure on the diverged side. Edit both copies together.",
+  "_comment_6": "This file is mirrored at dbmaster-tech-site/testdata/golden_license.json.",
+  "_comment_7": "Anyone can reproduce this seed and forge licenses; do NOT ship to production.",
+  "_comment_8": "Production keypair is an ops task (ADR-0001 C-3): generate via `openssl rand -hex 32`.",
+  "keypair": {
+    "seed_hex": "9d61b19deff5eb81fab4e6689d08fb4ecea2c25560960b4d3eea4504d03b5d0a",
+    "public_key_hex": "09d8caa3508f516e8a23bd2de103fb2024d94eb69c5ca7e8f046ec11c4db1304",
+    "dev_only": true
+  },
+  "fixtures": [
+    {
+      "name": "yearly",
+      "email": "alice@example.com",
+      "instance_id": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "license_type": "yearly",
+      "issued_at": "2026-08-05T12:00:00Z",
+      "expires_at": "2027-08-05T12:00:00Z",
+      "canonical": "email:alice@example.com\nexpires_at:2027-08-05T12:00:00Z\ninstance_id:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\nissued_at:2026-08-05T12:00:00Z\nproduct:server\ntype:yearly\nv:2",
+      "signature_hex": "a0a8231532b1b5593448b8a159fb44f0d29778f8cdcc53041fa30f1d7586712116a85edd0b7a779798b5dda069694ad22c5a1ba4f804387f972af1d7a0cdc103"
+    },
+    {
+      "name": "lifetime",
+      "email": "bob@example.com",
+      "instance_id": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "license_type": "lifetime",
+      "issued_at": "2026-08-05T12:00:00Z",
+      "expires_at": "",
+      "canonical": "email:bob@example.com\nexpires_at:\ninstance_id:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\nissued_at:2026-08-05T12:00:00Z\nproduct:server\ntype:lifetime\nv:2",
+      "signature_hex": "9584807a25a79d2ebc2b7ce4761e9d507ccc276a9e1efcad41fbd69f4c164f45742bf52f49d35222c41e3d9bda1a1eb80fc77629e3aea89a66b9218285344603"
+    }
+  ]
+}

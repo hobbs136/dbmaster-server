@@ -1,0 +1,43 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+/dist/
+/release/
+
+# Data (runtime)
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Environment
+.env
+.env.local
+
+# License signing keys — NEVER commit (#12). The Server Ed25519 private seed
+# is injected via the DBMASTER_SERVER_LICENSE_PRIVATE_KEY env var, but if an
+# operator writes it to disk (e.g. `openssl rand -hex 32 > server_private_key.hex`)
+# this keeps it out of the repo. See docs/license-key-rotation.md.
+*.hex
+server_private_key.hex
+
+# Issued license files (signed payloads) — never commit (parity with the
+# client-side *.dbmlicense ignore rule).
+*.dbmlicense
+
+# Local handoff notes (internal working file, may contain sensitive info) — never commit.
+handoff.md

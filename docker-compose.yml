@@ -1,0 +1,19 @@
+services:
+  dbmaster-server:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      # REQUIRED in production — generate with: openssl rand -base64 64
+      SERVER_JWT_SECRET: ${SERVER_JWT_SECRET:?Set SERVER_JWT_SECRET in .env}
+      SERVER_JWT_REFRESH_SECRET: ${SERVER_JWT_REFRESH_SECRET:?Set SERVER_JWT_REFRESH_SECRET in .env}
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 3000
+      DATABASE_URL: sqlite:/home/dbmaster/data/dbmaster.db?mode=rwc
+      RUST_LOG: dbmaster_server=info,tower_http=info
+    volumes:
+      - dbmaster-data:/home/dbmaster/data
+    restart: unless-stopped
+
+volumes:
+  dbmaster-data:

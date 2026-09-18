@@ -1,0 +1,12 @@
+-- 网关 server 侧 SSH 隧道（2026-08-29）。
+--
+-- 背景：SSH 隧道从客户端下沉到 server——客户端注册/测试连接时带 ssh
+-- 配置块，server 建立并持有到跳板机的隧道，所有网关连接类型（SQL 族 /
+-- Redis / MongoDB / TDengine）统一经本地转发端口访问目标库。
+--
+-- 存储设计：非秘密字段（sshHost/sshPort/sshUsername/sshAuthMode）落
+-- extra JSON（与 Mongo 集群配置同路径，可过 sanitize_extra）；秘密 JSON
+-- {"password":..,"privateKey":..,"passphrase":..} 整体 AES-256-GCM
+-- （encrypt_v1，与 password_encrypted 同密钥）加密后落本列。draft 不带
+-- ssh 时注册/复用更新两路径都置 NULL（编辑删掉隧道后重注册必须生效）。
+ALTER TABLE database_connections ADD COLUMN ssh_secret_encrypted TEXT NULL;

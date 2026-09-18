@@ -1,0 +1,36 @@
+[package]
+name = "dbmaster-drift"
+version.workspace = true
+edition.workspace = true
+description = "DbMaster Server schema-drift engine — source DB introspection, snapshot diffing, webhook notify"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# CHANGE: ADR-0002 §7.1 — drift crate depends on core (AppState/Config) and
+# automation (credential decrypt) for the runner to assemble a snapshot.
+dbmaster-core = { path = "../core" }
+dbmaster-automation = { path = "../automation" }
+dbmaster-license = { path = "../license" }
+# CHANGE: ADR-0002 §7.1 — sqlx opens customer source pools (mysql+postgres
+# pure-Rust drivers) and writes to the local SQLite audit/history/snapshot
+# tables. runtime-tokio matches the rest of the workspace.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "mysql", "postgres"] }
+# CHANGE: ADR-0002 §4.4.2 — outbound webhook delivery (Phase D).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# CHANGE: impl dbmaster_core::server::DriftRunner for the manual-run bridge.
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
+tracing = "0.1"
+anyhow = "1"
+sha2 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+# CHANGE: ADR-0002 Phase B/D — drift unit tests spin up in-memory SQLite pools
+# and an in-process TCP responder for webhook retry testing.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }

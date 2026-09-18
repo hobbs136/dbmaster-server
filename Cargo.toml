@@ -1,0 +1,113 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/automation",
+    "crates/license",
+    # CHANGE: ADR-0002 §7.1 / Phase B — schema-drift engine (snapshot +
+    # collector + diff + notify + audit + scheduler + runner).
+    "crates/drift",
+    # CHANGE: data-sync 一期 — ETL engine (time-batched JOIN + cron + cancel).
+    "crates/data_sync",
+    # CHANGE: ADR-0004 §2.1 — health-check engine (connectivity/metric
+    # monitoring + threshold alerting + webhook notify).
+    "crates/health_check",
+    # MCP 端点（dbx-response 举措一 / T03；ADR-0005 §2.2 MCP 工具=网关薄包装）。
+    "crates/mcp",
+    # DB 网关 API v1（dbx-response T27 / ADR-0005 §2.2——/api/gw/* 流式查询 + 元数据）。
+    "crates/gateway",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+description = "DbMaster Server — team collaboration and automation engine for database professionals"
+license = "AGPL-3.0-only"
+repository = "https://github.com/hobbs136/dbmaster-server"
+
+# Root package is the server binary
+[package]
+name = "dbmaster-server"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dbmaster-core = { path = "crates/core" }
+dbmaster-automation = { path = "crates/automation" }
+dbmaster-license = { path = "crates/license" }
+# CHANGE: ADR-0002 §7.1 / Phase E — binary crate spawns the drift scheduler.
+dbmaster-drift = { path = "crates/drift" }
+# CHANGE: data-sync 一期 — binary crate spawns the data_sync scheduler.
+dbmaster-data-sync = { path = "crates/data_sync" }
+# CHANGE: ADR-0004 §2.2 — binary crate constructs the HealthCheckRunner and
+# (in M5/T28) will spawn the health_check scheduler.
+dbmaster-health-check = { path = "crates/health_check" }
+# MCP 端点（dbx-response 举措一 / T03）——/mcp 挂进组合 router。
+dbmaster-mcp = { path = "crates/mcp" }
+# DB 网关 API v1（dbx-response T27）——/api/gw/* 挂进组合 router。
+dbmaster-gateway = { path = "crates/gateway" }
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+# CHANGE: ADR-0001 §4.8 D8.1 — main.rs needs hex/sha2 for key bootstrap, rand
+# for the dev-mode ephemeral key, and chrono for license expiry math.
+# lib.rs needs sqlx for the SqlitePool type in build_app signature.
+hex = "0.4"
+# reports-M3（#29）— native_collector_e2e_test 直连 Redis（CONFIG/阈值恢复；anyhow 已在 dependencies）。
+redis = { version = "1.6.0", features = ["tokio-comp"] }
+sha2 = "0.10"
+rand = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# CHANGE: ADR-0002 §7.1 / Phase A — open sqlx mysql+postgres drivers (pure-Rust,
+# no native deps) so Phase B collector can introspect customer source databases.
+# T29 — tls-rustls：MySQL 族 REQUIRE SSL 账号（实机 5.7 remote_user@3307）需要
+# 真 TLS；缺省构建无 TLS 时 Preferred 静默退明文被服务端 1045 拒绝。
+# 网关日期解码（CH 派生评估①）：chrono 接通 DATE/DATETIME/TIMESTAMP 解码臂
+# （chrono crate 本就在树——license 数学 + automation serde）；uuid 搭车
+# （PG uuid 列，uuid crate 本就是 automation 直接依赖）。
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "mysql", "postgres", "tls-rustls", "chrono", "uuid"] }
+# CHANGE: ADR-0002 §7.1 / Phase A — outbound HTTP for drift webhook delivery
+# (Phase D). rustls-tls avoids OpenSSL link pain; json for request bodies.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# CLI flag parsing (--embedded / --data-dir) for the
+# embedded-server mode (desktop client spawns the server as a child process).
+clap = { version = "4", features = ["derive"] }
+# main.rs serializes the stdout ready handshake JSON
+# (one line to stdout when --embedded). Promoted from dev-dependencies.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# main.rs defines a NoopDriftRunner impl (#[async_trait])
+# for embedded mode where the drift scheduler is never spawned. Promoted from
+# dev-dependencies.
+async-trait = "0.1"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower = "0.5"
+# CHANGE: ADR-0002 v1-C-9 — test helpers impl DriftRunner for AppState setup.
+async-trait = "0.1"
+# CHANGE: ADR-0002 Phase A — mirror [dependencies] sqlx feature set so test
+# builds see the same drivers (features unify within a package regardless).
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "mysql", "postgres", "tls-rustls", "chrono", "uuid"] }
+# CHANGE: 三期 — e2e 测试调 ClickHouse HTTP 接口验证写入结果。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+base64 = "0.22"
+# CHANGE: #3 — license_api_test needs tempfile (isolated .dbmlicense) +
+# ed25519-dalek + hex to sign test licenses that verify against
+# SERVER_PUBLIC_KEY_HEX (TEST_DEV_SEED in license crate's tests).
+tempfile = "3"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+hex = "0.4"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

@@ -1,0 +1,13 @@
+-- Tool-call audit (dbx-response T06): mcp_audit gains a nullable `tool`
+-- column recording which MCP tool a row refers to (tool name only).
+--
+-- New 'action' value from T06: 'tool_call' — one row per tools/call at the
+-- ServerHandler layer (migration 011 anticipated this: "Tool-call level audit
+-- (tool name + risk class only) joins in T06/T07"). Risk class joins in T07
+-- with read_query (metadata tools are read-only catalog reads).
+--
+-- Hard rule unchanged (011): NO SQL text, NO credentials, NO returned data,
+-- NO PII in any column. `error` carries a short redacted summary only;
+-- `tool` carries the static tool name (list_connections / list_databases /
+-- list_tables / describe_table, later read_query / submit_write / ...).
+ALTER TABLE mcp_audit ADD COLUMN tool TEXT;

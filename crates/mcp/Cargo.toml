@@ -1,0 +1,47 @@
+[package]
+name = "dbmaster-mcp"
+version.workspace = true
+edition.workspace = true
+description = "DbMaster Server MCP endpoint — Model Context Protocol tools for AI agents (dbx-response 举措一 / task T03；ADR-0005 网关 API 的 MCP 薄包装层)"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+axum = "0.7"
+# MCP 官方 Rust SDK。Streamable HTTP 传输以 tower service 形态暴露
+# （StreamableHttpService），经 axum Router::route_service 挂载。
+rmcp = { version = "3.1", features = ["server", "transport-streamable-http-server"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+# CHANGE: T04 — token 校验/限流核（SlidingWindowLimiter）复用 core；sqlx 为
+# 审计写入（mcp_audit 表），uuid/chrono 为审计行 id 与时间戳；sha2 为长效
+# MCP token 的哈希存储（明文只在创建时返回一次）。
+dbmaster-core = { path = "../core" }
+# T06 — 4 个元数据工具的 DB 能力后端（automation metadata 模块，与网关
+# API v1 同源；连接生命周期复用 db_handler 的 open_* helper）。
+dbmaster-automation = { path = "../automation" }
+# rmcp 把 http::request::Parts 注入消息 extensions（工具层从
+# RequestContext.extensions 读 guard 放入的 Claims）——需要直接引用 http
+# 类型（1.x，与 axum 0.7 同一 crate 实例）。
+http = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+sha2 = "0.10"
+# AppError::Internal 装 anyhow::Error（错误映射复用 core 的 AppError）。
+anyhow = "1"
+sqlparser = "0.62.0"
+# D1（2026-08-27 拍板：写门读放）——写路径工具的 license 门读运行时
+# entitlement（与 core AppState 同一 ArcSwap 实例，热换即时生效）。
+dbmaster-license = { path = "../license" }
+arc-swap = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tower = "0.5"
+http-body-util = "0.1"
+# T20 e2e：直调真 approve handler 需要构造 core AppState（Noop runner 的
+# #[async_trait] impl + Trial 态 EntitlementState）。
+async-trait = "0.1"

@@ -1,0 +1,42 @@
+[package]
+name = "dbmaster-core"
+version.workspace = true
+edition.workspace = true
+description = "DbMaster Server core — authentication, workspace management, REST API"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# CHANGE: ADR-0001 §7.1 — core uses EntitlementState in AppState.
+dbmaster-license = { path = "../license" }
+# CHANGE: #3 — ArcSwap<EntitlementState> enables runtime swap via POST /api/license.
+arc-swap = "1"
+# CHANGE: #3 — constant-time admin token comparison (subtle is rustls's
+# transitive dep; declare direct for clarity).
+subtle = "2"
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+# CHANGE: ADR-0002 §7.1 / Phase A — open sqlx mysql+postgres drivers (pure-Rust,
+# no native deps) so Phase B drift collector can introspect customer source DBs.
+# default-features stays enabled: the derive feature gates #[derive(FromRow)]
+# (used by user/workspace models) and sqlx::migrate! (used by db/pool.rs).
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "mysql", "postgres"] }
+# CHANGE: ADR-0002 §7.1 / Phase A — outbound HTTP for drift webhook (Phase D).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+jsonwebtoken = "9"
+argon2 = "0.5"
+# CHANGE: bridge automation's manual-run handler to drift's runner without
+# introducing an automation→drift edge (drift already depends on automation).
+# The trait lives in core; drift provides the impl; AppState carries the Arc.
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+dotenvy = "0.15"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }

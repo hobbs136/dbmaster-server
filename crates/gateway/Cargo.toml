@@ -1,0 +1,34 @@
+[package]
+name = "dbmaster-gateway"
+version.workspace = true
+edition.workspace = true
+description = "DbMaster Server DB gateway API v1 — /api/gw/* streaming query + metadata endpoints (dbx-response T27 / ADR-0005 §2.2)"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+axum = "0.7"
+# SSE 流式响应的行事件通道 + 执行任务 spawn + 墙钟超时。
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+tokio-util = "0.7"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+# 认证（JWT 验签）/限流（SlidingWindowLimiter）/Config 复用 core。
+dbmaster-core = { path = "../core" }
+# 元数据三端点（metadata.rs）+ 流式执行（stream_query.rs）+ 草稿测试
+# （test_draft_connection）同源后端——网关是薄 HTTP/SSE 封装层。
+dbmaster-automation = { path = "../automation" }
+# 单语句约束复用 mcp risk::statement_count（SQL 分析件；与 MCP 面同一
+# 语义。层次注记：risk 逻辑上属 automation 层，后续重构可上移）。
+dbmaster-mcp = { path = "../mcp" }
+# gw_audit 审计写入。
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tower = "0.5"
+http-body-util = "0.1"

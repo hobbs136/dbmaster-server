@@ -1,0 +1,27 @@
+[package]
+name = "dbmaster-license"
+version.workspace = true
+edition.workspace = true
+description = "DbMaster Server license management — Ed25519 v2 license verification, instance id, trial, entitlement"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+hex = "0.4"
+rand = "0.8"
+# CHANGE: ADR-0001 §7.1 — entitlement/trial/instance need DB + time + error plumbing.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+anyhow = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+# CHANGE: ADR-0001 §7.1 — instance/trial tests need the tokio runtime.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# CHANGE: C-8 integration gate — parse tests/golden_license.json (the byte-level
+# contract shared with tech-site Go). Keeps both sides cryptographically aligned.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# CHANGE: #3 — write_license_file tests need tempdir for isolation.
+tempfile = "3"

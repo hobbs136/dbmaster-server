@@ -1,0 +1,16 @@
+DbMaster Server — automation engine for the DbMaster database client
+Copyright (c) 2026 dbmaster contributors
+
+This program is licensed under the GNU Affero General Public License
+v3.0 only (AGPL-3.0-only), as published by the Free Software Foundation.
+The complete license text is available in the LICENSE file at the root of
+this repository, or at <https://www.gnu.org/licenses/>.
+
+If you distribute a modified version of this program, you must provide
+the complete source code of the modified version under the same license
+(AGPL-3.0-only).
+
+This repository contains no vendored third-party components. Each
+dependency of this program is distributed under the terms stated in its
+own source repository / package manifest (see Cargo.toml and Cargo.lock
+for the resolved dependency set).

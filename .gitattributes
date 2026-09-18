@@ -1,0 +1,5 @@
+# sqlx::migrate! 在编译期内嵌迁移文件字节计算 checksum——行尾差异
+# （CRLF/LF，Windows autocrlf 检出 vs macOS git archive）会导致同一迁移
+# 校验和漂移，存量库对新二进制报 VersionMismatch 启动即崩（2026-08-25
+# embedded 模式实锤）。钉死 LF，保证各平台构建校验和一致。
+migrations/*.sql text eol=lf

@@ -1,0 +1,82 @@
+[package]
+name = "dbmaster-automation"
+version.workspace = true
+edition.workspace = true
+description = "DbMaster Server automation engine — scheduled data sync, health checks, slow query reports"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dbmaster-core = { path = "../core" }
+# CHANGE: ADR-0002 v1-C-2 — automation gate needs EntitlementState::is_gated().
+# Already a transitive dep via dbmaster-core; made direct for type access.
+dbmaster-license = { path = "../license" }
+axum = "0.7"
+# CHANGE: ADR-0002 v1-C-9 — run_task_now spawns the drift runner off-thread so
+# the HTTP request can return 202 immediately.
+# S10: "sync" adds tokio::sync::Mutex for txn session serialization.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+# CHANGE: ADR-0002 §7.1 / Phase A — open sqlx mysql+postgres drivers (pure-Rust,
+# no native deps) so Phase B drift collector can introspect customer source DBs.
+# default-features stays enabled: derive feature gates #[derive(FromRow)] used
+# by automation models (ScheduledTask, DatabaseConnection, etc.).
+# T29 — rust_decimal / chrono / uuid：类型解码臂（NewDecimal 保精度字符串；
+# DATE/DATETIME/TIMESTAMP 族与 PG timestamp/timestamptz/uuid——crate 本体
+# 均已是直接依赖，feature 只接通 sqlx 类型兼容表）。
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "mysql", "postgres", "tls-rustls", "rust_decimal", "chrono", "uuid"] }
+# T29 — NewDecimal（DECIMAL 列）解码直接依赖（sqlx rust_decimal feature
+# 只接通类型兼容表，crate 本体需显式声明才能引用）。
+rust_decimal = "1"
+# CHANGE: ADR-0002 §7.1 / Phase A — outbound HTTP for drift webhook (Phase D).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+# T29 非 SQL 批次（B1）— preserve_order：Mongo 命令文档首键 = 命令名
+# （BTreeMap 字母序会把 "filter" 排到 "find" 前面，命令即废）；bson 自身
+# 基于 indexmap，此 feature 的传递成本为零。副作用是全局 JSON 键保序
+# （语义无害，值比较不受影响）。
+serde_json = { version = "1", features = ["preserve_order"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+# S10: txn session store (concurrent session_id → TxnSession map).
+dashmap = "6"
+tracing = "0.1"
+# CHANGE: ADR-0001 §4.8 D8 — credential encryption (AES-256-GCM).
+aes-gcm = "0.10"
+base64 = "0.22"
+hex = "0.4"
+sha2 = "0.10"
+rand = "0.8"
+anyhow = "1"
+# T27 — stream_query 的 sqlx fetch 行流消费（StreamExt::next/map）。
+# T29 — rust_decimal：NewDecimal（DECIMAL 列）解码（T24 既有缺口收口——
+# 网关 JSON/DECIMAL 直读落 null 的修复依赖该 feature 的类型兼容表）。
+futures = "0.3"
+# T27 — stream_query 的 CancellationToken（DELETE /executions/{id} 显式取消）。
+tokio-util = "0.7"
+# T28 — SQL Server 经网关（ADR-0005 §2.4：tiberius 纯 async TDS 客户端，
+# +0.7MB 代价已接受）。default-features off：不要 native-tls（OpenSSL 链接
+# 负担）/winauth（NTLM 不在网关场景）；rustls 做 TLS（加密默认 Required），
+# tds73 = SQL Server 2008+ 协议版本，chrono 让日期/时间列可解码为 ISO 字符串。
+tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls", "chrono"] }
+# T29 非 SQL 批次（B1，ADR-0006）— MongoDB 网关腿（runCommand 单形状 +
+# 游标展平）。默认 TLS = rustls（3.x 起无 OpenSSL 链接负担，与 tiberius
+# 同一取向）；exe 体积增量见 gw_mongodb e2e 文件头登记。
+mongodb = "3"
+# mongodb 的 BSON 类型层（Document/Bson；与 mongodb 3.x 内置 bson 2.x 同源）。
+bson = "2"
+redis = { version = "1.6.0", features = ["tokio-rustls-comp", "tls-rustls-webpki-roots", "tls-rustls-insecure"] }
+# server 侧 SSH 隧道 — russh 纯 Rust SSH 客户端（无 OpenSSL 链接负担，与
+# tiberius/mongodb 的 rustls 取向一致）。默认 feature 走 rustls crypto；
+# 与 tokio 1.x 无版本冲突（russh 本身基于 tokio）。
+russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "flate2"] }
+
+[dev-dependencies]
+# CHANGE: ADR-0001 §4.8 D8 — credential migration tests use the tokio runtime.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# 网络层批次 — gw_net_e2e 的进程内 TLS 桩（server 侧 rustls）。版本对齐
+# redis tokio-rustls-comp 已在树上的 0.26（rustls 0.23）；ring provider 与
+# russh 取向一致（不引 aws-lc-rs 的构建负担）。pemfile 解析测试 fixture PEM。
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "1"
