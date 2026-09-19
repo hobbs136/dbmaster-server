@@ -30,6 +30,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::txn::{ConnParams, DbTxnSessionStore};
+// T12s — gw 草稿测试失败的稳定码契约（值域常量 + 驱动错误判别）。
+use crate::connect_error::{self, DraftTestError};
 
 use crate::credential::decrypt_password;
 // T28 — SQL Server（tiberius/TDS）后端基建（连接/解码/类型格式化）。
@@ -247,39 +249,30 @@ async fn test_sqlite(conn: &DbConnectionRow) -> anyhow::Result<()> {
 
 /// T28 — SQL Server 连通性测试（每调用一条专用 tiberius 连接，SELECT 1）。
 async fn test_sqlserver(conn: &DbConnectionRow, password: &str) -> anyhow::Result<()> {
-    let mut client = open_sqlserver(conn, password, None)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    client
-        .simple_query("SELECT 1")
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // T12s — 不再 `anyhow::anyhow!("{e}")` 抹类型：驱动错误对象是
+    // error_code 判别的入口（Display/redact 文案逐字节不变）。
+    let mut client = open_sqlserver(conn, password, None).await?;
+    client.simple_query("SELECT 1").await?;
     Ok(())
 }
 
 /// T29 非 SQL 批次（B1）— MongoDB 连通性测试（admin ping；auth/网络问题
 /// 在此一并失败，错误经调用方 redact）。
 async fn test_mongo(conn: &DbConnectionRow, password: &str) -> anyhow::Result<()> {
-    let client = crate::mongo::open_mongo(conn, password)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let client = crate::mongo::open_mongo(conn, password).await?;
     client
         .database("admin")
         .run_command(bson::doc! {"ping": 1})
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .await?;
     Ok(())
 }
 
 /// T29 非 SQL 批次（B3）— Redis 连通性测试（db 0 + PING）。
 async fn test_redis(conn: &DbConnectionRow, password: &str) -> anyhow::Result<()> {
-    let mut conn = crate::redis_leg::open_redis(conn, password, 0)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut conn = crate::redis_leg::open_redis(conn, password, 0).await?;
     redis::cmd("PING")
         .query_async::<redis::Value>(&mut conn)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .await?;
     Ok(())
 }
 
@@ -309,10 +302,12 @@ pub struct DraftConnection {
 ///
 /// 与既有 db_test（按已注册 conn_id）互补：本函数面向「保存前测试」
 /// （c01_port_contract §5：测试 = 远程调用，不落库）。错误消息经 redact
-/// （不含 host/凭据）。
+/// （不含 host/凭据）；T12s 起失败附稳定码 [`DraftTestError::code`]
+/// （wire `error_code`，值域与码→语义见 `connect_error` 模块文档；
+/// `error` 文案字段语义不变，gateway 侧只加性回传）。
 pub async fn test_draft_connection(
     draft: &DraftConnection,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, DraftTestError> {
     // 临时投影到 DbConnectionRow（test_* helper 的输入形状；不入库）。
     let mut conn = DbConnectionRow {
         db_type: draft.db_type.clone(),
@@ -348,7 +343,12 @@ pub async fn test_draft_connection(
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "draft ssh tunnel resolve failed");
-                    return Err("ssh tunnel setup failed".to_string());
+                    // T12s — 隧道建立失败 = 目标经网络不可达（码语义见
+                    // connect_error 模块）；文案保持既有固定话术。
+                    return Err(DraftTestError {
+                        code: connect_error::UNREACHABLE,
+                        message: "ssh tunnel setup failed".to_string(),
+                    });
                 }
             }
         }
@@ -359,24 +359,24 @@ pub async fn test_draft_connection(
         t if crate::mysql_family::mysql_family_for(t).is_some() => {
             test_mysql(&conn, &draft.password)
                 .await
-                .map_err(|e| redact(&e.to_string()))?;
+                .map_err(draft_failure)?;
             Ok(non_empty_version(version_string(&conn, &draft.password).await))
         }
         "postgres" | "postgresql" | "pg" => {
             test_pg(&conn, &draft.password)
                 .await
-                .map_err(|e| redact(&e.to_string()))?;
+                .map_err(draft_failure)?;
             Ok(non_empty_version(version_string(&conn, &draft.password).await))
         }
         "sqlite" => {
-            test_sqlite(&conn).await.map_err(|e| redact(&e.to_string()))?;
+            test_sqlite(&conn).await.map_err(draft_failure)?;
             Ok(non_empty_version(version_string(&conn, &draft.password).await))
         }
         // T28 — SQL Server（tiberius；mssql 别名同接受）。
         "sqlserver" | "mssql" => {
             test_sqlserver(&conn, &draft.password)
                 .await
-                .map_err(|e| redact(&e.to_string()))?;
+                .map_err(draft_failure)?;
             Ok(non_empty_version(version_string(&conn, &draft.password).await))
         }
         // T29 第三批 — ClickHouse 走 MySQL 兼容口（9004），复用 test_mysql
@@ -385,7 +385,7 @@ pub async fn test_draft_connection(
         "clickhouse" => {
             test_mysql(&conn, &draft.password)
                 .await
-                .map_err(|e| redact(&e.to_string()))?;
+                .map_err(draft_failure)?;
             Ok(non_empty_version(version_string(&conn, &draft.password).await))
         }
         // T29 非 SQL 批次（B1）— MongoDB：ping 认可达性；版本走 buildInfo
@@ -393,7 +393,7 @@ pub async fn test_draft_connection(
         "mongodb" | "mongo" => {
             test_mongo(&conn, &draft.password)
                 .await
-                .map_err(|e| redact(&e.to_string()))?;
+                .map_err(draft_failure)?;
             Ok(non_empty_version(version_string(&conn, &draft.password).await))
         }
         // T29 非 SQL 批次（B3）— Redis：PING 认可达性；版本走 INFO server 的
@@ -401,18 +401,52 @@ pub async fn test_draft_connection(
         "redis" => {
             test_redis(&conn, &draft.password)
                 .await
-                .map_err(|e| redact(&e.to_string()))?;
+                .map_err(draft_failure)?;
             Ok(non_empty_version(version_string(&conn, &draft.password).await))
         }
         // T29 TDengine 批次 — taosAdapter REST：SELECT SERVER_VERSION() code==0
-        // 即可达且凭据有效；版本同语句（tdengine_leg 同源）。
+        // 即可达且凭据有效；版本同语句（tdengine_leg 同源）。T12s — 返回
+        // 类型化 TdError，判别复用既有 REST 三分类（tdengine_failure）。
         "tdengine" => {
             crate::tdengine_leg::test_tdengine(&conn, &draft.password)
                 .await
-                .map_err(|e| redact(&e.to_string()))?;
+                .map_err(tdengine_failure)?;
             Ok(non_empty_version(version_string(&conn, &draft.password).await))
         }
-        other => Err(format!("unsupported db_type: {other}")),
+        other => Err(DraftTestError {
+            code: connect_error::DB_ERROR,
+            message: format!("unsupported db_type: {other}"),
+        }),
+    }
+}
+
+/// 驱动错误 → 草稿测试失败：码判别（`connect_error::classify_driver_error`，
+/// 纯函数、构造对象单测在 connect_error）+ redact 文案（与旧裸 String
+/// 形态逐字节一致）。
+fn draft_failure(e: anyhow::Error) -> DraftTestError {
+    DraftTestError {
+        code: connect_error::classify_driver_error(&e),
+        message: redact(&e.to_string()),
+    }
+}
+
+/// TDengine TdError → 草稿测试失败：复用 tdengine_leg 既有 REST 三分类
+/// 判别（Auth/Transport/Http/Engine），文案与旧 String 形态逐字节一致。
+fn tdengine_failure(e: crate::tdengine_leg::TdError) -> DraftTestError {
+    use crate::tdengine_leg::TdError;
+    let message = match &e {
+        TdError::Auth => "authentication failed".to_string(),
+        TdError::Transport => "connection failed".to_string(),
+        TdError::Http(status, body) => format!("HTTP {status}: {body}"),
+        TdError::Engine(code, desc) => format!("engine error {code}: {desc}"),
+    };
+    DraftTestError {
+        code: match e {
+            TdError::Auth => connect_error::AUTH_DENIED,
+            TdError::Transport => connect_error::UNREACHABLE,
+            TdError::Http(..) | TdError::Engine(..) => connect_error::DB_ERROR,
+        },
+        message: redact(&message),
     }
 }
 

@@ -626,6 +626,19 @@ fn validate_draft(body: &ConnectionDraftBody) -> Result<String, Response> {
     Ok(db_type)
 }
 
+/// 草稿测试失败响应 body（200）：`ok:false` + `error`（redact 裸串，既有
+/// 字段原样保留）+ `error_code`（T12s 加性新增——稳定码枚举串，值域与
+/// 码→语义见 automation `connect_error` 模块文档；不含用户名/IP/凭据明文）
+/// + `elapsedMs`。
+fn draft_test_failure_body(code: &str, message: &str, elapsed_ms: u64) -> Value {
+    json!({
+        "ok": false,
+        "error": message,
+        "error_code": code,
+        "elapsedMs": elapsed_ms,
+    })
+}
+
 /// POST /api/gw/connections/test — 草稿测试（不落库；测试 = 远程调用，
 /// c01_port_contract §5）。成功尽力附引擎版本。
 pub(crate) async fn test_connection(
@@ -668,9 +681,9 @@ pub(crate) async fn test_connection(
             }
             (StatusCode::OK, Json(data)).into_response()
         }
-        Err(msg) => (
+        Err(fail) => (
             StatusCode::OK,
-            Json(json!({ "ok": false, "error": msg, "elapsedMs": elapsed_ms })),
+            Json(draft_test_failure_body(fail.code, &fail.message, elapsed_ms)),
         )
             .into_response(),
     }
@@ -1110,5 +1123,16 @@ mod tests {
         assert_eq!(strip_uri_credentials("http://a/b@c"), "http://a/b@c");
         assert_eq!(strip_uri_credentials("mongodb://@h:1"), "mongodb://@h:1");
         assert_eq!(strip_uri_credentials("no-scheme@host"), "no-scheme@host");
+    }
+
+    #[test]
+    fn draft_test_failure_body_adds_error_code_and_keeps_error() {
+        // T12s 验收③：凭据类失败（AUTH_DENIED）→ 响应 JSON 含 error_code
+        // 且 error 字符串字段仍在（加性新增，旧客户端口径不变）。
+        let v = draft_test_failure_body("AUTH_DENIED", "database connection failed", 12);
+        assert_eq!(v["ok"], json!(false));
+        assert_eq!(v["error_code"], json!("AUTH_DENIED"));
+        assert_eq!(v["error"], json!("database connection failed"));
+        assert_eq!(v["elapsedMs"], json!(12));
     }
 }

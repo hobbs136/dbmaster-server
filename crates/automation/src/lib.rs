@@ -8,6 +8,10 @@ pub mod credential;
 pub mod model;
 pub mod handler;
 pub mod db_handler;
+// T12s — gw `POST /api/gw/connections/test` 失败响应 error_code 的契约
+// 常量（值域定义）+ 驱动错误 → 码判别（gateway 无驱动依赖，判别收在本
+// crate；值域与码→语义见模块文档，只加不删）。
+pub mod connect_error;
 // T21 — MySQL 协议族薄适配层（hook 面 + db_type 注册表；Doris 首个子类，
 // T22-T25 的 OceanBase/TiDB/StarRocks/MariaDB 按同模板接入）。
 pub(crate) mod mysql_family;

@@ -405,6 +405,47 @@ async fn test_connection_failure_is_ok_false_with_redacted_error() {
 }
 
 #[tokio::test]
+async fn test_connection_failure_body_carries_error_code() {
+    // T12s — 失败响应加性 error_code（稳定码枚举串）。sqlserver（tiberius）
+    // 是单次 TcpStream::connect：拒连即时呈现 ConnectionRefused。redis 不选
+    // （1.6 默认给建连包 1s 超时，拒连会以 TimedOut 呈现 → TIMEOUT）；SQL
+    // 族的拒连在 sqlx 池内退避重试到 acquire 超时 → TIMEOUT，同样不选。
+    let config = test_config(GwKnobs::default());
+    let pool = server_pool().await;
+    let token = token_for(&config, "user-1");
+    let app = router(config, pool);
+
+    // 绑定后立即丢弃 → 端口必然拒连（不依赖真库）。
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let resp = app
+        .oneshot(authed_post_json(
+            &token,
+            "/api/gw/connections/test",
+            serde_json::json!({
+                "dbType": "sqlserver",
+                "host": "127.0.0.1",
+                "port": port,
+                "username": "u",
+                "password": "p"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error_code"], "UNREACHABLE");
+    // error 字符串字段仍在（只加性新增，旧客户端口径不变）。
+    assert!(v["error"].as_str().is_some_and(|s| !s.is_empty()));
+    // error_code 是枚举串：不含 host/端口/凭据明文。
+    assert!(!v["error_code"].as_str().unwrap().contains("127.0.0.1"));
+}
+
+#[tokio::test]
 async fn per_user_rate_limit_returns_429() {
     let knobs = GwKnobs { rate_limit_per_minute: 1, ..Default::default() };
     let config = test_config(knobs);

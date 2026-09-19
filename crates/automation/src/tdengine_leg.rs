@@ -191,15 +191,13 @@ pub(crate) async fn server_version(conn: &DbConnectionRow, password: &str) -> St
         .to_string()
 }
 
-/// 连接测试（同语句同口径：code == 0 即可达且凭据有效）。
-pub(crate) async fn test_tdengine(conn: &DbConnectionRow, password: &str) -> Result<(), String> {
-    match exec_sql(conn, password, None, "SELECT SERVER_VERSION()", Duration::from_secs(10)).await {
-        Ok(_) => Ok(()),
-        Err(TdError::Auth) => Err("authentication failed".to_string()),
-        Err(TdError::Transport) => Err("connection failed".to_string()),
-        Err(TdError::Http(status, body)) => Err(format!("HTTP {status}: {body}")),
-        Err(TdError::Engine(code, desc)) => Err(format!("engine error {code}: {desc}")),
-    }
+/// 连接测试（同语句同口径：code == 0 即可达且凭据有效）。T12s — 返回
+/// 类型化 TdError（Auth/Transport 判别是 gw 草稿测试 error_code 的入口，
+/// 见 db_handler::tdengine_failure；不再串行化成 String 丢判别信息）。
+pub(crate) async fn test_tdengine(conn: &DbConnectionRow, password: &str) -> Result<(), TdError> {
+    exec_sql(conn, password, None, "SELECT SERVER_VERSION()", Duration::from_secs(10))
+        .await
+        .map(|_| ())
 }
 
 #[cfg(test)]
