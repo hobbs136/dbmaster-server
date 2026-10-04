@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # No -D warnings: the workspace carries a pre-existing warning baseline;
+      # CI fails on compile errors and clippy errors only.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      # Offline-green contract: integration tests that need external DBs /
+      # services are env-gated and SKIP when the env vars are absent
+      # (see .env.example). In-process suites use in-memory SQLite;
+      # embedded_process_test spawns the server binary on an OS-assigned
+      # localhost port, which works on the runner as-is.
+      - name: Test
+        run: cargo test --workspace
