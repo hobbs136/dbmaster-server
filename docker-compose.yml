@@ -7,6 +7,9 @@ services:
       # REQUIRED in production — generate with: openssl rand -base64 64
       SERVER_JWT_SECRET: ${SERVER_JWT_SECRET:?Set SERVER_JWT_SECRET in .env}
       SERVER_JWT_REFRESH_SECRET: ${SERVER_JWT_REFRESH_SECRET:?Set SERVER_JWT_REFRESH_SECRET in .env}
+      # REQUIRED — AES-256-GCM credential master key, 32 bytes as 64 hex chars.
+      # Generate with: openssl rand -hex 32
+      DBMASTER_CREDENTIAL_KEY: ${DBMASTER_CREDENTIAL_KEY:?Set DBMASTER_CREDENTIAL_KEY in .env}
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 3000
       DATABASE_URL: sqlite:/home/dbmaster/data/dbmaster.db?mode=rwc
