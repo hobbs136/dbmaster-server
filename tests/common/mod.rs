@@ -73,9 +73,23 @@ impl dbmaster_core::server::HealthCheckRunner for NoopHealthCheckRunner {
     }
 }
 
+/// Opt into the insecure dev JWT-secret fallback once per test process
+/// (`Config::from_env`, reached via `dbmaster_server::build_app`, fails fast
+/// when the signing secrets are unset — audit S-2). These integration suites
+/// run without server env and never assert on token signatures, so the dev
+/// default is fine here. `Once` because parallel tests share the process
+/// environment (and `DBMASTER_DEV` is also read at runtime by the drift /
+/// data_sync / health_check runners' webhook scheme checks — set it exactly
+/// once, early, so behavior is order-independent).
+fn enable_dev_jwt_fallback() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("DBMASTER_DEV", "1"));
+}
+
 /// Build a test router with in-memory SQLite and migrations applied.
 // CHANGE: ADR-0001 §7.1 — compose via the binary lib (merges core + automation).
 pub async fn build_test_app() -> Router {
+    enable_dev_jwt_fallback();
     // Default to a Trial entitlement far in the future so gated paths don't fire
     // in tests that exercise auth/workspace flows.
     let far_future = chrono::Utc::now() + chrono::Duration::days(365);
@@ -94,6 +108,7 @@ pub async fn build_test_app() -> Router {
 pub async fn build_test_app_with_entitlement(
     entitlement: dbmaster_license::EntitlementState,
 ) -> Router {
+    enable_dev_jwt_fallback();
     let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
     dbmaster_core::db::run_migrations(&pool).await.unwrap();
     // Tests don't rely on real encryption — use a deterministic zero key.
@@ -117,6 +132,7 @@ pub async fn build_test_app_with_entitlement(
 /// HTTP requests served from the same pool (this same sharing is what makes
 /// existing create→list round-trip tests pass).
 pub async fn build_test_app_with_pool() -> (Router, SqlitePool) {
+    enable_dev_jwt_fallback();
     let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
     dbmaster_core::db::run_migrations(&pool).await.unwrap();
     let credential_key = [0u8; 32];

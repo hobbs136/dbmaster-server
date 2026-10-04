@@ -10,7 +10,9 @@ services:
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 3000
       DATABASE_URL: sqlite:/home/dbmaster/data/dbmaster.db?mode=rwc
-      RUST_LOG: dbmaster_server=info,tower_http=info
+      # dbmaster_core=info keeps config boot WARNs (e.g. insecure dev-secret
+      # fallback) visible to the operator.
+      RUST_LOG: dbmaster_server=info,dbmaster_core=info,tower_http=info
     volumes:
       - dbmaster-data:/home/dbmaster/data
     restart: unless-stopped

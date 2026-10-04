@@ -95,7 +95,7 @@ HTTP-gated endpoints (`/api/tasks`, `/api/approvals`, etc.) reflect the new Lice
 ### Prerequisites
 
 - **Rust** stable (`rustup install stable`), or **Docker** for containerized runs. All dependencies are pure Rust — no OpenSSL or native libraries needed.
-- Two JWT secrets (required in production; dev defaults exist but are insecure):
+- Two JWT secrets — **required, fail-fast**: the server refuses to start when either is unset (a hardcoded default in a public repo would let anyone forge auth tokens). For throwaway local development only, `DBMASTER_DEV=1` enables insecure defaults instead:
   ```bash
   export SERVER_JWT_SECRET=$(openssl rand -base64 64)
   export SERVER_JWT_REFRESH_SECRET=$(openssl rand -base64 64)
@@ -163,14 +163,14 @@ All dependencies are pure-Rust (sqlx with `runtime-tokio` + `sqlite`, no OpenSSL
 |---|---|---|
 | `SERVER_HOST` | `0.0.0.0` | Bind address |
 | `SERVER_PORT` | `3000` | Listen port |
-| `SERVER_JWT_SECRET` | dev-only default | HS256 secret for access tokens — **set in production** |
-| `SERVER_JWT_REFRESH_SECRET` | dev-only default | HS256 secret for refresh tokens — **set in production, must differ** |
+| `SERVER_JWT_SECRET` | **required** (fails fast if unset; `DBMASTER_DEV=1` → insecure dev default) | HS256 secret for access tokens |
+| `SERVER_JWT_REFRESH_SECRET` | **required** (fails fast if unset; `DBMASTER_DEV=1` → insecure dev default) | HS256 secret for refresh tokens — must differ from `SERVER_JWT_SECRET` |
 | `DATABASE_URL` | `sqlite:dbmaster.db?mode=rwc` | SQLite path (`sqlite::memory:` for tests) |
-| `RUST_LOG` | `dbmaster_server=info` | Log filter |
+| `RUST_LOG` | `dbmaster_server=info,dbmaster_core=info` | Log filter (`dbmaster_core` carries config boot WARNs, e.g. the insecure dev-secret fallback) |
 | `DBMASTER_CREDENTIAL_KEY` | none (dev: random per-boot) | 32-byte AES-256-GCM master key (hex) encrypting stored DB credentials — **required in production** (server fails fast if unset). |
 | `DBMASTER_DRIFT_DEFAULT_INTERVAL_MINS` | `30` | Default per-task drift-watch scan interval in minutes. Each task may override via its `config.interval_minutes`. Clamped to `1..=1440` (1 minute to 24 hours); out-of-range or unparseable values fall back to the default with a WARN log. |
 | `DBMASTER_DRIFT_WEBHOOK_TIMEOUT_SECS` | `10` | Per-HTTP-request timeout for drift webhook delivery. Each delivery still receives the full retry schedule. |
-| `DBMASTER_DEV` | unset | Set to `1` to enable dev mode, which permits `http://localhost` / `http://127.0.0.1` / `http://[::1]` webhook URLs (loopback only). Production mode refuses any non-`https://` URL — payload must never traverse a plaintext link. |
+| `DBMASTER_DEV` | unset | Set to `1` to enable dev mode: permits `http://localhost` / `http://127.0.0.1` / `http://[::1]` webhook URLs (loopback only), enables the insecure dev JWT secret defaults, and enables the ephemeral credential key. Production mode refuses non-`https://` webhook URLs and refuses to boot without the JWT secrets / credential key. |
 | `DBMASTER_MCP_RATE_LIMIT_PER_MIN` | `120` | MCP `/mcp` per-user rate limit (requests per minute, sliding window). Agents issue one HTTP request per tool call, so this is higher than the auth endpoints' 5/min-per-IP. Clamped to `1..=10000` — a typo can't disable rate limiting. |
 | `DBMASTER_MCP_READ_QUERY_MAX_ROWS` | `10000` | Ceiling for the `read_query` MCP tool's per-call `max_rows` (per-call default 500). Matches the REST gateway row cap so both entry points share the same blast radius. Clamped `1..=100000`. |
 | `DBMASTER_MCP_READ_QUERY_TIMEOUT_SECS` | `30` | Server-side statement timeout for `read_query` (the per-call connection pool is dropped on expiry, killing the query server-side). Clamped `1..=600`. |

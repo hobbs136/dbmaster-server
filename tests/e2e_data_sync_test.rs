@@ -24,6 +24,17 @@ use dbmaster_core::config::Config;
 use dbmaster_core::server::{AppState, DataSyncRunner};
 use dbmaster_license::EntitlementState;
 
+/// The e2e suite only assembles an `AppState` (it never exercises real JWT
+/// auth), but `Config::from_env` now fails fast when the JWT signing secrets
+/// are unset (audit S-2). These tests run without server env, so opt into the
+/// insecure dev fallback explicitly. `Once` because parallel tests share the
+/// process environment.
+fn test_config() -> Config {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("DBMASTER_DEV", "1"));
+    Config::from_env().expect("config (dev fallback via DBMASTER_DEV=1)")
+}
+
 /// e2e 环境参数（全部经 `DS_E2E_*` env 注入，见 `.env.example`）。
 struct TestEnv {
     mysql_url: String,
@@ -618,7 +629,7 @@ async fn e2e_mysql_join_to_pg() {
     println!("[e2e] seeded connections: source={src_id}, target={tgt_id}");
 
     // 4. 组装 AppState
-    let config = Config::from_env().expect("config");
+    let config = test_config();
     let state = AppState::new(
         ctrl.clone(),
         config,
@@ -676,7 +687,7 @@ async fn e2e_upsert_idempotent() {
     let src_id = &conns.mysql_src;
     let tgt_id = &conns.pg_tgt;
 
-    let config = Config::from_env().unwrap();
+    let config = test_config();
     let state = AppState::new(
         ctrl.clone(), config, [0u8; 32],
         EntitlementState::Trial { expires_at: chrono::Utc::now() + chrono::Duration::days(30) },
@@ -738,7 +749,7 @@ async fn e2e_mysql_to_mysql_truncate() {
     dbmaster_core::db::run_migrations(&ctrl).await.unwrap();
     let conns = seed_connections(&ctrl, &env).await;
 
-    let config = Config::from_env().unwrap();
+    let config = test_config();
     let state = AppState::new(
         ctrl.clone(), config, [0u8; 32],
         EntitlementState::Trial { expires_at: chrono::Utc::now() + chrono::Duration::days(30) },
@@ -799,7 +810,7 @@ async fn e2e_incremental_start_cursor() {
     dbmaster_core::db::run_migrations(&ctrl).await.unwrap();
     let conns = seed_connections(&ctrl, &env).await;
 
-    let config = Config::from_env().unwrap();
+    let config = test_config();
     let state = AppState::new(
         ctrl.clone(), config, [0u8; 32],
         EntitlementState::Trial { expires_at: chrono::Utc::now() + chrono::Duration::days(30) },
@@ -854,7 +865,7 @@ async fn e2e_cron_scheduler_dispatch() {
     dbmaster_core::db::run_migrations(&ctrl).await.unwrap();
     let conns = seed_connections(&ctrl, &env).await;
 
-    let config = Config::from_env().unwrap();
+    let config = test_config();
     let state = AppState::new(
         ctrl.clone(), config, [0u8; 32],
         EntitlementState::Trial { expires_at: chrono::Utc::now() + chrono::Duration::days(30) },
@@ -957,7 +968,7 @@ async fn e2e_mysql_to_clickhouse() {
     dbmaster_core::db::run_migrations(&ctrl).await.unwrap();
     let conns = seed_connections(&ctrl, &env).await;
 
-    let config = Config::from_env().unwrap();
+    let config = test_config();
     let state = AppState::new(
         ctrl.clone(), config, [0u8; 32],
         EntitlementState::Trial { expires_at: chrono::Utc::now() + chrono::Duration::days(30) },
@@ -1004,7 +1015,7 @@ async fn e2e_mysql_to_doris_stream_load() {
     dbmaster_core::db::run_migrations(&ctrl).await.unwrap();
     let conns = seed_connections(&ctrl, &env).await;
 
-    let config = Config::from_env().unwrap();
+    let config = test_config();
     let state = AppState::new(
         ctrl.clone(), config, [0u8; 32],
         EntitlementState::Trial { expires_at: chrono::Utc::now() + chrono::Duration::days(30) },

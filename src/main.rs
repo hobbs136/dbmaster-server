@@ -87,7 +87,10 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "dbmaster_server=info,tower_http=info".into()),
+                // dbmaster_core=info: config.rs boot WARNs (insecure dev-secret
+                // fallback, out-of-range env knobs) must reach the operator —
+                // without this they'd be silently filtered out.
+                .unwrap_or_else(|_| "dbmaster_server=info,dbmaster_core=info,tower_http=info".into()),
         )
         .init();
 

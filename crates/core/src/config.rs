@@ -1,7 +1,11 @@
 //! Server configuration loaded from environment variables.
 //!
-//! All settings have sensible defaults for development. Production deployments
-//! MUST set `SERVER_JWT_SECRET` and `SERVER_JWT_REFRESH_SECRET` to strong random values.
+//! Most settings have sensible defaults for development. The JWT signing
+//! secrets (`SERVER_JWT_SECRET` / `SERVER_JWT_REFRESH_SECRET`) are REQUIRED:
+//! `from_env` fails fast when either is unset, unless `DBMASTER_DEV=1` (which
+//! falls back to an insecure dev default with a WARN). A hardcoded fallback
+//! reachable in production would let anyone forge auth tokens for any `sub`
+//! (the repo is public — see `resolve_secret_env`).
 
 /// Server configuration sourced from environment variables (with `.env` support via `dotenvy`).
 #[derive(Clone, Debug)]
@@ -10,9 +14,14 @@ pub struct Config {
     pub host: String,
     /// Port to listen on.
     pub port: u16,
-    /// Secret key for signing access tokens (HS256). Must be set in production.
+    /// Secret key for signing access tokens (HS256).
+    ///
+    /// Required: `from_env` fails fast when unset (or blank) unless
+    /// `DBMASTER_DEV=1`, which enables an insecure dev default with a WARN.
     pub jwt_secret: String,
-    /// Secret key for signing refresh tokens (HS256). Must differ from `jwt_secret` in production.
+    /// Secret key for signing refresh tokens (HS256). Must differ from `jwt_secret`.
+    ///
+    /// Same required / fail-fast semantics as [`Config::jwt_secret`].
     pub jwt_refresh_secret: String,
     /// SQLite database URL (e.g. "sqlite:dbmaster.db" or "sqlite::memory:").
     pub database_url: String,
@@ -108,10 +117,20 @@ impl Config {
                 .unwrap_or_else(|_| "3000".to_string())
                 .parse()
                 .unwrap_or(3000),
-            jwt_secret: std::env::var("SERVER_JWT_SECRET")
-                .unwrap_or_else(|_| "dev-jwt-secret-change-in-production".to_string()),
-            jwt_refresh_secret: std::env::var("SERVER_JWT_REFRESH_SECRET")
-                .unwrap_or_else(|_| "dev-refresh-secret-change-in-production".to_string()),
+            // SECURITY (audit S-2): no silent hardcoded fallback for the JWT
+            // signing secrets — a public-repo default would let anyone forge
+            // tokens for any `sub`. Fails fast like `load_credential_key`
+            // (src/main.rs); `DBMASTER_DEV=1` opts into the insecure dev default.
+            // Embedded mode is unaffected: it builds Config directly with
+            // per-boot random secrets and never calls from_env (ADR-0003).
+            jwt_secret: resolve_secret_env(
+                "SERVER_JWT_SECRET",
+                "dev-jwt-secret-change-in-production",
+            )?,
+            jwt_refresh_secret: resolve_secret_env(
+                "SERVER_JWT_REFRESH_SECRET",
+                "dev-refresh-secret-change-in-production",
+            )?,
             database_url: std::env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "sqlite:dbmaster.db?mode=rwc".to_string()),
             // CHANGE: telemetry-funnel-plan.md D5 — env-controlled funnel-lite flag.
@@ -205,6 +224,45 @@ impl Config {
                 10000,
             ),
         })
+    }
+}
+
+/// Escape hatch that unlocks insecure dev defaults (exact `"1"`, mirroring
+/// `load_credential_key` in src/main.rs so both boot-time checks share one
+/// opt-in semantics).
+const DEV_MODE_ENV: &str = "DBMASTER_DEV";
+
+/// Resolve a REQUIRED secret env var (the JWT signing secrets).
+///
+/// - Set to a non-blank value → used verbatim.
+/// - Unset / blank and `DBMASTER_DEV=1` → insecure dev default + WARN.
+/// - Otherwise → error (fail fast): a silently-applied hardcoded default in a
+///   public repo would let anyone forge auth tokens for any user id.
+///
+/// The configured value is never echoed into the error or the log (only the
+/// variable name) so secrets can't leak through diagnostics.
+fn resolve_secret_env(key: &str, dev_default: &'static str) -> anyhow::Result<String> {
+    match std::env::var(key) {
+        Ok(v) if !v.trim().is_empty() => Ok(v),
+        _ => {
+            let dev_mode = matches!(std::env::var(DEV_MODE_ENV).as_deref(), Ok("1"));
+            if dev_mode {
+                tracing::warn!(
+                    key,
+                    "{key} not set; {DEV_MODE_ENV}=1 — using the insecure dev default. \
+                     NEVER deploy with this fallback."
+                );
+                Ok(dev_default.to_string())
+            } else {
+                Err(anyhow::anyhow!(
+                    "{key} not set and {DEV_MODE_ENV} != 1; refusing to start with an \
+                     insecure fallback (this repo is public — a hardcoded secret would \
+                     let anyone forge auth tokens). Set {key} to a strong random value \
+                     (e.g. `openssl rand -base64 64`) or set {DEV_MODE_ENV}=1 for local \
+                     development."
+                ))
+            }
+        }
     }
 }
 
@@ -444,5 +502,52 @@ mod tests {
         assert!(parse_bool_env("DBMASTER_TEST_SQ_ENABLED_UNSET", true));
         std::env::remove_var("DBMASTER_TEST_SQ_STORE_UNSET");
         assert!(parse_bool_env("DBMASTER_TEST_SQ_STORE_UNSET", true));
+    }
+
+    // SECURITY (audit S-2) — required-secret resolution. All DBMASTER_DEV
+    // paths live in ONE test so parallel sibling tests can't race on the
+    // global var (same lesson as the parse_bool_env_* rename above).
+    #[test]
+    fn resolve_secret_env_paths() {
+        // 1. Set to a non-blank value → used verbatim (dev mode irrelevant).
+        std::env::remove_var("DBMASTER_DEV");
+        std::env::set_var("DBMASTER_TEST_SECRET_SET", "real-secret-value");
+        assert_eq!(
+            resolve_secret_env("DBMASTER_TEST_SECRET_SET", "dev-default").unwrap(),
+            "real-secret-value"
+        );
+        std::env::remove_var("DBMASTER_TEST_SECRET_SET");
+
+        // 2. Set-but-blank → treated as missing (a blank secret is not a secret);
+        //    with DBMASTER_DEV=1 that resolves to the insecure dev default.
+        std::env::set_var("DBMASTER_DEV", "1");
+        std::env::set_var("DBMASTER_TEST_SECRET_BLANK", "   ");
+        assert_eq!(
+            resolve_secret_env("DBMASTER_TEST_SECRET_BLANK", "dev-default").unwrap(),
+            "dev-default"
+        );
+        std::env::remove_var("DBMASTER_TEST_SECRET_BLANK");
+
+        // 3. Unset + dev mode → dev default (with a WARN; asserted via Ok).
+        assert_eq!(
+            resolve_secret_env("DBMASTER_TEST_SECRET_DEV", "dev-default").unwrap(),
+            "dev-default"
+        );
+
+        // 4. Unset + no dev mode → fail fast with an actionable message that
+        //    names the variable and the escape hatch, and never echoes a value.
+        std::env::remove_var("DBMASTER_DEV");
+        let err = resolve_secret_env("DBMASTER_TEST_SECRET_MISSING", "dev-default")
+            .expect_err("must refuse to resolve a missing secret outside dev mode");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("DBMASTER_TEST_SECRET_MISSING"),
+            "error must name the variable: {msg}"
+        );
+        assert!(msg.contains("DBMASTER_DEV"), "error must name the escape hatch: {msg}");
+        assert!(
+            !msg.contains("dev-default") && !msg.contains("real-secret-value"),
+            "error must not echo any secret-ish value: {msg}"
+        );
     }
 }

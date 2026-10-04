@@ -42,7 +42,12 @@ async fn register_and_get_token(app: &mut axum::Router, email: &str) -> String {
 /// Build an AppState over the given pool with a far-future Trial entitlement
 /// and zero credential key (mirrors e2e_data_sync_test's assembly).
 fn test_state(pool: SqlitePool) -> AppState {
-    let config = Config::from_env().expect("config (all fields have defaults)");
+    // JWT secrets fail fast when unset (audit S-2); this suite runs without
+    // server env, so opt into the insecure dev fallback explicitly. `Once`
+    // because parallel tests share the process environment.
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("DBMASTER_DEV", "1"));
+    let config = Config::from_env().expect("config (dev fallback via DBMASTER_DEV=1)");
     AppState::new(
         pool,
         config,
