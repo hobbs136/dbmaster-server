@@ -340,9 +340,14 @@ async fn run_embedded(data_dir_override: Option<PathBuf>) -> anyhow::Result<()> 
         jwt_secret,
         jwt_refresh_secret,
         database_url: database_url.clone(),
-        // S-5 — embedded is always open: it never serves public registration
-        // (the user is bootstrapped programmatically) and binds loopback only.
-        registration_enabled: true,
+        // Security P2-1 — embedded hardcodes public registration OFF: the
+        // single user is bootstrapped programmatically (direct call to
+        // ensure_embedded_user_and_tokens below, never the HTTP endpoint) and
+        // the desktop client receives its tokens via the stdout handshake. The
+        // register endpoint stays mounted but always answers
+        // 403 REGISTRATION_DISABLED, so a same-host process cannot
+        // self-register to obtain a JWT.
+        registration_enabled: false,
         funnel_lite_enabled: true,
         drift_default_interval_mins: 30,
         drift_webhook_timeout_secs: 10,

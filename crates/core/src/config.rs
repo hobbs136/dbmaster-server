@@ -32,8 +32,10 @@ pub struct Config {
     /// Any unrecognized value fails CLOSED (`parse_bool_env` accepts only
     /// `1/true/yes/on`, case-insensitive): a typo on a public deployment
     /// must disable registration, never silently re-open it. Embedded mode
-    /// hardcodes this to `true` — it binds loopback only and creates its
-    /// single user programmatically, never via the endpoint.
+    /// hardcodes this to `false` (security P2-1): it binds loopback only,
+    /// creates its single user programmatically and delivers tokens via the
+    /// stdout handshake, so the endpoint is never needed — there it always
+    /// answers 403 `REGISTRATION_DISABLED`.
     pub registration_enabled: bool,
     // CHANGE: telemetry-funnel-plan.md D5 — funnel-lite kill switch. Defaults
     // ON; flip off via `DBMASTER_FUNNEL_LITE_ENABLED=0`. Surfaced via

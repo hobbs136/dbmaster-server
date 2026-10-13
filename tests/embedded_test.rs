@@ -9,6 +9,9 @@
 //! - An app built with `build_app_with_config` + the synthesized entitlement
 //!   serves `/api/health` and accepts a token-issued write without returning
 //!   `ENTITLEMENT_GATED`.
+//! - Public registration is hardcoded off in embedded mode (security P2-1):
+//!   a `POST /api/auth/register` against an embedded-composed app is rejected
+//!   with 403 `REGISTRATION_DISABLED` and writes no user row.
 
 mod common;
 
@@ -382,6 +385,78 @@ async fn embedded_mode_rejects_drift_and_health_tasks() {
     assert!(String::from_utf8_lossy(&bytes).contains("UNSUPPORTED_IN_EMBEDDED"));
 }
 
+/// Security P2-1 — embedded mode hardcodes `registration_enabled: false`, so
+/// the register endpoint (still mounted by the shared router) must reject a
+/// legitimate registration attempt through the embedded app composition path
+/// with 403 `REGISTRATION_DISABLED`. The embedded user comes from the direct
+/// `ensure_embedded_user_and_tokens` bootstrap call, never from this endpoint
+/// — a same-host process cannot self-register to obtain a JWT.
+#[tokio::test]
+async fn embedded_mode_register_endpoint_returns_403() {
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    dbmaster_core::db::run_migrations(&pool).await.unwrap();
+
+    // test_config() mirrors run_embedded, whose registration_enabled is false.
+    let config = test_config();
+    let install_uuid = "test-install-uuid".to_string();
+    let entitlement = embedded_entitlement(&install_uuid);
+
+    let app = dbmaster_server::build_app_with_config(
+        pool.clone(),
+        config,
+        [0u8; 32],
+        entitlement,
+        install_uuid,
+        Arc::new(LocalNoopDriftRunner),
+        Arc::new(LocalNoopDataSyncRunner),
+        Arc::new(LocalNoopHealthCheckRunner),
+        // embedded_mode = true (same composition as run_embedded).
+        true,
+    );
+
+    // A fully valid payload: rejection must come from the registration switch
+    // itself, not validation. The gate is the handler's first statement, before
+    // validation and any DB access, so the error must not leak whether the
+    // email exists (the users table is empty here).
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/register")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "email": "intruder@example.com",
+                        "password": "secure12345",
+                        "display_name": "Intruder"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "REGISTRATION_DISABLED");
+    // No account/token material echoed back, and the submitted email is not
+    // reflected anywhere in the response.
+    assert!(body.get("user").is_none());
+    assert!(body.get("access_token").is_none());
+    assert!(body.get("refresh_token").is_none());
+    assert!(!body.to_string().contains("intruder@example.com"));
+
+    // The gate runs before any DB write: registration created no user row.
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "register must not create a user when disabled");
+}
+
 /// A minimal Config with fixed test secrets. Mirrors the structure `run_embedded`
 /// builds, but with deterministic values for test stability.
 fn test_config() -> Config {
@@ -391,7 +466,9 @@ fn test_config() -> Config {
         jwt_secret: "test-jwt-secret-embedded-aaaaaaaaaaaaaaaa".to_string(),
         jwt_refresh_secret: "test-refresh-secret-embedded-aaaaaaaaaaaaaa".to_string(),
         database_url: "sqlite::memory:".to_string(),
-        registration_enabled: true,
+        // Security P2-1 — mirrors run_embedded: embedded hardcodes public
+        // registration off (the register endpoint answers 403 there).
+        registration_enabled: false,
         funnel_lite_enabled: true,
         drift_default_interval_mins: 30,
         drift_webhook_timeout_secs: 10,
