@@ -24,6 +24,10 @@ In scope (non-exhaustive): authentication or authorization bypass, credential-va
 
 The desktop client ([github.com/hobbs136/dbmaster](https://github.com/hobbs136/dbmaster)) and the purchase site are separate codebases — report issues through their respective channels.
 
+### Deployment hardening
+
+dbmaster-server assumes a **single team sharing one instance**: every authenticated user can see and use all registered connections, vault-encrypted credentials included. If the server is reachable beyond a trusted network, set `DBMASTER_REGISTRATION_ENABLED=0` once the initial account exists — an open register endpoint means anyone who can reach the host gets full visibility over every registered connection — and/or put network-layer isolation (VPN / firewall / authenticated reverse proxy) in front. See the README's "Multi-user semantics & connection sharing" section.
+
 ## What to expect
 
 Reports are triaged by the maintainer as quickly as possible. You'll receive an acknowledgement, and follow-ups as diagnosis and a fix progress. Once a fix is released, you are welcome to be credited (opt-in) in the release notes.

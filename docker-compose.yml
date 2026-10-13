@@ -10,6 +10,9 @@ services:
       # REQUIRED — AES-256-GCM credential master key, 32 bytes as 64 hex chars.
       # Generate with: openssl rand -hex 32
       DBMASTER_CREDENTIAL_KEY: ${DBMASTER_CREDENTIAL_KEY:?Set DBMASTER_CREDENTIAL_KEY in .env}
+      # Public registration switch: default open; set 0 in .env after the
+      # initial account exists (recommended for public deployments).
+      DBMASTER_REGISTRATION_ENABLED: ${DBMASTER_REGISTRATION_ENABLED:-true}
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 3000
       DATABASE_URL: sqlite:/home/dbmaster/data/dbmaster.db?mode=rwc

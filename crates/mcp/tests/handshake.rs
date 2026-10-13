@@ -34,6 +34,7 @@ fn test_config(rate_limit: u32) -> Arc<Config> {
         jwt_secret: "test-mcp-jwt-secret".into(),
         jwt_refresh_secret: "test-mcp-refresh-secret".into(),
         database_url: "sqlite::memory:".into(),
+        registration_enabled: true,
         funnel_lite_enabled: false,
         drift_default_interval_mins: 30,
         drift_webhook_timeout_secs: 10,

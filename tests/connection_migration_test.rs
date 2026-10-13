@@ -66,6 +66,7 @@ fn test_config() -> Config {
         jwt_secret: "test-jwt-secret-aaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         jwt_refresh_secret: "test-refresh-secret-aaaaaaaaaaaaaaaaaaa".into(),
         database_url: "sqlite::memory:".into(),
+        registration_enabled: true,
         funnel_lite_enabled: true,
         drift_default_interval_mins: 30,
         drift_webhook_timeout_secs: 10,

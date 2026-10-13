@@ -93,7 +93,9 @@ pub async fn build_test_app() -> Router {
     // Default to a Trial entitlement far in the future so gated paths don't fire
     // in tests that exercise auth/workspace flows.
     let far_future = chrono::Utc::now() + chrono::Duration::days(365);
-    let entitlement = dbmaster_license::EntitlementState::Trial { expires_at: far_future };
+    let entitlement = dbmaster_license::EntitlementState::Trial {
+        expires_at: far_future,
+    };
     build_test_app_with_entitlement(entitlement).await
 }
 
@@ -117,8 +119,17 @@ pub async fn build_test_app_with_entitlement(
     let install_uuid = "test-install-uuid-fixed-000000000000000000000000000".to_string();
     let runner: Arc<dyn dbmaster_core::server::DriftRunner> = Arc::new(NoopDriftRunner);
     let ds_runner: Arc<dyn dbmaster_core::server::DataSyncRunner> = Arc::new(NoopDataSyncRunner);
-    let hc_runner: Arc<dyn dbmaster_core::server::HealthCheckRunner> = Arc::new(NoopHealthCheckRunner);
-    dbmaster_server::build_app(pool, credential_key, entitlement, install_uuid, runner, ds_runner, hc_runner)
+    let hc_runner: Arc<dyn dbmaster_core::server::HealthCheckRunner> =
+        Arc::new(NoopHealthCheckRunner);
+    dbmaster_server::build_app(
+        pool,
+        credential_key,
+        entitlement,
+        install_uuid,
+        runner,
+        ds_runner,
+        hc_runner,
+    )
 }
 
 /// Build a test router along with a clone of the underlying pool, for tests
@@ -137,11 +148,14 @@ pub async fn build_test_app_with_pool() -> (Router, SqlitePool) {
     dbmaster_core::db::run_migrations(&pool).await.unwrap();
     let credential_key = [0u8; 32];
     let far_future = chrono::Utc::now() + chrono::Duration::days(365);
-    let entitlement = dbmaster_license::EntitlementState::Trial { expires_at: far_future };
+    let entitlement = dbmaster_license::EntitlementState::Trial {
+        expires_at: far_future,
+    };
     let install_uuid = "test-install-uuid-fixed-000000000000000000000000000".to_string();
     let runner: Arc<dyn dbmaster_core::server::DriftRunner> = Arc::new(NoopDriftRunner);
     let ds_runner: Arc<dyn dbmaster_core::server::DataSyncRunner> = Arc::new(NoopDataSyncRunner);
-    let hc_runner: Arc<dyn dbmaster_core::server::HealthCheckRunner> = Arc::new(NoopHealthCheckRunner);
+    let hc_runner: Arc<dyn dbmaster_core::server::HealthCheckRunner> =
+        Arc::new(NoopHealthCheckRunner);
     let app = dbmaster_server::build_app(
         pool.clone(),
         credential_key,
@@ -150,6 +164,80 @@ pub async fn build_test_app_with_pool() -> (Router, SqlitePool) {
         runner,
         ds_runner,
         hc_runner,
+    );
+    (app, pool)
+}
+
+/// Build a Config literally for registration-switch tests (audit S-5).
+///
+/// The switch must NEVER be driven through the process environment in tests
+/// (`std::env::set_var("DBMASTER_REGISTRATION_ENABLED")` races with every
+/// parallel test in the same binary whose app was built via
+/// `Config::from_env`). Tests construct the Config explicitly and pass it to
+/// [`build_test_app_from_config`]. Secrets are fixed throwaway strings.
+pub fn test_config_with_registration(registration_enabled: bool) -> dbmaster_core::config::Config {
+    dbmaster_core::config::Config {
+        host: "127.0.0.1".to_string(),
+        port: 3000,
+        jwt_secret: "test-jwt-secret-aaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        jwt_refresh_secret: "test-refresh-secret-aaaaaaaaaaaaaaaaaaa".to_string(),
+        database_url: "sqlite::memory:".to_string(),
+        registration_enabled,
+        // Auth-focused tests don't exercise the telemetry funnel.
+        funnel_lite_enabled: false,
+        drift_default_interval_mins: 30,
+        drift_webhook_timeout_secs: 10,
+        data_sync_default_batch_size: 10000,
+        data_sync_max_concurrency: 1,
+        mcp_rate_limit_per_minute: 120,
+        mcp_read_query_max_rows: 10000,
+        mcp_read_query_timeout_secs: 30,
+        mcp_allowed_hosts: Vec::new(),
+        mcp_allowed_connections: Vec::new(),
+        gw_rate_limit_per_minute: 600,
+        gw_query_default_rows: 500,
+        gw_query_max_rows: 10000,
+        gw_query_timeout_secs: 30,
+        slow_query_enabled: true,
+        slow_query_threshold_ms: 1000,
+        slow_query_store_sql: true,
+        slow_query_retention_days: 14,
+        slow_query_cap_per_digest_per_hour: 20,
+    }
+}
+
+/// Build a test router from an EXPLICIT Config (audit S-5).
+///
+/// Unlike [`build_test_app`] this never touches `Config::from_env()`/process
+/// env — the caller's Config is honoured verbatim (e.g. registration
+/// disabled). Returns the pool alongside the router so tests can seed tables
+/// directly (e.g. pre-existing users rows for the gate-ordering test).
+pub async fn build_test_app_from_config(
+    config: dbmaster_core::config::Config,
+) -> (Router, SqlitePool) {
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    dbmaster_core::db::run_migrations(&pool).await.unwrap();
+    let credential_key = [0u8; 32];
+    let far_future = chrono::Utc::now() + chrono::Duration::days(365);
+    let entitlement = dbmaster_license::EntitlementState::Trial {
+        expires_at: far_future,
+    };
+    let install_uuid = "test-install-uuid-fixed-000000000000000000000000000".to_string();
+    let runner: Arc<dyn dbmaster_core::server::DriftRunner> = Arc::new(NoopDriftRunner);
+    let ds_runner: Arc<dyn dbmaster_core::server::DataSyncRunner> = Arc::new(NoopDataSyncRunner);
+    let hc_runner: Arc<dyn dbmaster_core::server::HealthCheckRunner> =
+        Arc::new(NoopHealthCheckRunner);
+    let app = dbmaster_server::build_app_with_config(
+        pool.clone(),
+        config,
+        credential_key,
+        entitlement,
+        install_uuid,
+        runner,
+        ds_runner,
+        hc_runner,
+        // Not embedded: mirrors the remote (production) composition.
+        false,
     );
     (app, pool)
 }

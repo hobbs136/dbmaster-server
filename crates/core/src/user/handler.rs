@@ -9,34 +9,42 @@ use crate::auth::password;
 use crate::error::AppError;
 use crate::server::AppState;
 use crate::user::model::{
-    CreateUserRequest, LoginRequest, RefreshRequest, TokenPair, UpdateProfileRequest,
-    UserResponse, UserWithTokens,
+    CreateUserRequest, LoginRequest, RefreshRequest, TokenPair, UpdateProfileRequest, UserResponse,
+    UserWithTokens,
 };
 
 /// `POST /api/auth/register` — Create a new user account.
+///
+/// Gated by `Config::registration_enabled` (audit S-5): the check is the FIRST
+/// statement — before `validate()` and the email duplicate COUNT — so a
+/// disabled server never touches the DB and cannot leak email existence
+/// through 409/400 differences.
 pub async fn register(
     State(state): State<AppState>,
     Json(req): Json<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<UserWithTokens>), AppError> {
+    // S-5 — public-registration kill switch.
+    if !state.config.registration_enabled {
+        return Err(AppError::RegistrationDisabled);
+    }
+
     let req = req.normalized();
     req.validate().map_err(AppError::Validation)?;
 
     // Check uniqueness of email (case-insensitive)
-    let exists = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER(?)",
-    )
-    .bind(&req.email)
-    .fetch_one(&state.pool)
-    .await?;
+    let exists =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER(?)")
+            .bind(&req.email)
+            .fetch_one(&state.pool)
+            .await?;
 
     if exists > 0 {
         return Err(AppError::Conflict("Email already registered.".to_string()));
     }
 
     // Hash the password
-    let password_hash =
-        password::hash_password(&req.password)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Password hashing failed: {}", e)))?;
+    let password_hash = password::hash_password(&req.password)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Password hashing failed: {}", e)))?;
 
     let user_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
@@ -60,10 +68,9 @@ pub async fn register(
 
     // Store refresh token
     let refresh_id = Uuid::new_v4().to_string();
-    let expires_at =
-        chrono::DateTime::from_timestamp(refresh_claims.exp as i64, 0)
-            .unwrap_or(Utc::now())
-            .to_rfc3339();
+    let expires_at = chrono::DateTime::from_timestamp(refresh_claims.exp as i64, 0)
+        .unwrap_or(Utc::now())
+        .to_rfc3339();
     sqlx::query(
         "INSERT INTO refresh_tokens (id, user_id, jti, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
     )
@@ -125,10 +132,9 @@ pub async fn login(
     // Store refresh token
     let refresh_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    let expires_at =
-        chrono::DateTime::from_timestamp(refresh_claims.exp as i64, 0)
-            .unwrap_or(Utc::now())
-            .to_rfc3339();
+    let expires_at = chrono::DateTime::from_timestamp(refresh_claims.exp as i64, 0)
+        .unwrap_or(Utc::now())
+        .to_rfc3339();
     sqlx::query(
         "INSERT INTO refresh_tokens (id, user_id, jti, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
     )
@@ -236,9 +242,8 @@ pub async fn refresh_token(
         .fetch_optional(&state.pool)
         .await?;
 
-    let token_row = token_row.ok_or(AppError::Unauthorized(
-        "Invalid refresh token.".to_string(),
-    ))?;
+    let token_row =
+        token_row.ok_or(AppError::Unauthorized("Invalid refresh token.".to_string()))?;
 
     if token_row.revoked_at.is_some() {
         return Err(AppError::Unauthorized(
@@ -261,10 +266,9 @@ pub async fn refresh_token(
 
     // Store new refresh token
     let new_id = Uuid::new_v4().to_string();
-    let expires_at =
-        chrono::DateTime::from_timestamp(new_claims.exp as i64, 0)
-            .unwrap_or(Utc::now())
-            .to_rfc3339();
+    let expires_at = chrono::DateTime::from_timestamp(new_claims.exp as i64, 0)
+        .unwrap_or(Utc::now())
+        .to_rfc3339();
     sqlx::query(
         "INSERT INTO refresh_tokens (id, user_id, jti, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
     )
@@ -336,10 +340,7 @@ pub async fn ensure_embedded_user_and_tokens(
     let mut rand_bytes = [0u8; 32];
     use rand::RngCore;
     rand::rngs::OsRng.fill_bytes(&mut rand_bytes);
-    let throwaway_password: String = rand_bytes
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let throwaway_password: String = rand_bytes.iter().map(|b| format!("{b:02x}")).collect();
     let password_hash = password::hash_password(&throwaway_password)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Password hashing failed: {}", e)))?;
 
@@ -357,12 +358,11 @@ pub async fn ensure_embedded_user_and_tokens(
     .await?;
 
     // Whether we won the INSERT or lost the race, SELECT the canonical row.
-    let (user_id,): (String,) = sqlx::query_as(
-        "SELECT id FROM users WHERE LOWER(email) = LOWER(?)",
-    )
-    .bind(EMBEDDED_USER_EMAIL)
-    .fetch_one(pool)
-    .await?;
+    let (user_id,): (String,) =
+        sqlx::query_as("SELECT id FROM users WHERE LOWER(email) = LOWER(?)")
+            .bind(EMBEDDED_USER_EMAIL)
+            .fetch_one(pool)
+            .await?;
 
     // Issue the embedded pair: far-future TTLs (30d access / 31d refresh).
     // Safe because the embedded server signs with per-boot random secrets —
@@ -370,8 +370,7 @@ pub async fn ensure_embedded_user_and_tokens(
     // the client's transparent refresh chain valid when the access token
     // finally nears expiry.
     let access_token = jwt::issue_embedded_access_token(config, &user_id)?;
-    let (refresh_token, refresh_claims) =
-        jwt::issue_embedded_refresh_token(config, &user_id)?;
+    let (refresh_token, refresh_claims) = jwt::issue_embedded_refresh_token(config, &user_id)?;
 
     let refresh_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();

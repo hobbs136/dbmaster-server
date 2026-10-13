@@ -198,9 +198,15 @@ async fn login_wrong_password_returns_401() {
 
     resp.assert_status(StatusCode::UNAUTHORIZED);
     let body: serde_json::Value = resp.json_value().await;
-    assert!(body["error"]["code"].as_str().unwrap().contains("INVALID_CREDENTIALS"));
+    assert!(body["error"]["code"]
+        .as_str()
+        .unwrap()
+        .contains("INVALID_CREDENTIALS"));
     // Must not reveal whether email or password was wrong
-    assert!(body["error"]["message"].as_str().unwrap().contains("Invalid email or password"));
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Invalid email or password"));
 }
 
 #[tokio::test]
@@ -253,10 +259,7 @@ async fn refresh_token_success() {
     assert!(refreshed["access_token"].as_str().unwrap().len() > 10);
     assert!(refreshed["refresh_token"].as_str().unwrap().len() > 10);
     // New refresh token should be different from old one (rotation)
-    assert_ne!(
-        refreshed["refresh_token"].as_str().unwrap(),
-        &refresh_token
-    );
+    assert_ne!(refreshed["refresh_token"].as_str().unwrap(), &refresh_token);
 }
 
 #[tokio::test]
@@ -309,6 +312,103 @@ async fn refresh_token_invalid_returns_401() {
     .await;
 
     resp.assert_status(StatusCode::UNAUTHORIZED);
+}
+
+// ── S-5: DBMASTER_REGISTRATION_ENABLED ──
+// Disabled-state tests build the app from an EXPLICIT Config (never the
+// process env — the var is read once per app build and parallel tests share
+// the process environment, so flipping it would race sibling apps).
+
+#[tokio::test]
+async fn register_disabled_returns_403_with_stable_code() {
+    let (mut app, _pool) =
+        common::build_test_app_from_config(common::test_config_with_registration(false)).await;
+
+    let resp = common::post(
+        &mut app,
+        "/api/auth/register",
+        json!({
+            "email": "mallory@example.com",
+            "password": "secure12345",
+            "display_name": "Mallory"
+        }),
+    )
+    .await;
+
+    resp.assert_status(StatusCode::FORBIDDEN);
+    let body: serde_json::Value = resp.json_value().await;
+    assert_eq!(body["error"]["code"], "REGISTRATION_DISABLED");
+    // No account/token material in the body, and the submitted email is not
+    // echoed anywhere.
+    assert!(body.get("user").is_none());
+    assert!(body.get("access_token").is_none());
+    assert!(body.get("refresh_token").is_none());
+    assert!(!body.to_string().contains("mallory@example.com"));
+}
+
+#[tokio::test]
+async fn register_disabled_gates_before_duplicate_check() {
+    let (mut app, pool) =
+        common::build_test_app_from_config(common::test_config_with_registration(false)).await;
+
+    // Pre-seed the target email directly (registration is the only user-write
+    // endpoint and it is gated): if the gate ran AFTER the email COUNT, this
+    // request would return 409 CONFLICT and leak that the email exists.
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash, display_name, created_at, updated_at) \
+         VALUES ('seed-user-1', 'taken@example.com', 'x', 'Seed', ?, ?)",
+    )
+    .bind(&now)
+    .bind(&now)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let resp = common::post(
+        &mut app,
+        "/api/auth/register",
+        json!({
+            "email": "taken@example.com",
+            "password": "secure12345",
+            "display_name": "Taken"
+        }),
+    )
+    .await;
+
+    // 403 (not 409): the gate fires before the duplicate check.
+    resp.assert_status(StatusCode::FORBIDDEN);
+    let body: serde_json::Value = resp.json_value().await;
+    assert_eq!(body["error"]["code"], "REGISTRATION_DISABLED");
+
+    // users row count unchanged — the disabled server never wrote.
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn register_disabled_does_not_affect_login() {
+    let (mut app, _pool) =
+        common::build_test_app_from_config(common::test_config_with_registration(false)).await;
+
+    // Unknown credentials → 401 INVALID_CREDENTIALS (the switch scopes to
+    // register only; login/refresh are untouched).
+    let resp = common::post(
+        &mut app,
+        "/api/auth/login",
+        json!({
+            "email": "unknown@example.com",
+            "password": "some-password"
+        }),
+    )
+    .await;
+
+    resp.assert_status(StatusCode::UNAUTHORIZED);
+    let body: serde_json::Value = resp.json_value().await;
+    assert_eq!(body["error"]["code"], "INVALID_CREDENTIALS");
 }
 
 // Rate limiting: 5 requests/min per IP, shared across register/login/refresh.

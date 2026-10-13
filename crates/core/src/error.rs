@@ -38,6 +38,12 @@ pub enum AppError {
     // ── Authorization ──
     /// Authenticated but lacking permission (403).
     Forbidden(String),
+    /// Public self-service registration is disabled by config (403, audit S-5).
+    ///
+    /// Returned by `POST /api/auth/register` before validation and the email
+    /// duplicate check, so a disabled server never touches the DB and cannot
+    /// leak email existence through 409/400 differences.
+    RegistrationDisabled,
 
     // ── Resources ──
     /// Requested resource doesn't exist (404).
@@ -68,6 +74,7 @@ impl AppError {
             Self::TokenExpired => (StatusCode::UNAUTHORIZED, "TOKEN_EXPIRED"),
             Self::InvalidCredentials => (StatusCode::UNAUTHORIZED, "INVALID_CREDENTIALS"),
             Self::Forbidden(_) => (StatusCode::FORBIDDEN, "FORBIDDEN"),
+            Self::RegistrationDisabled => (StatusCode::FORBIDDEN, "REGISTRATION_DISABLED"),
             Self::NotFound(_) => (StatusCode::NOT_FOUND, "NOT_FOUND"),
             Self::Conflict(_) => (StatusCode::CONFLICT, "CONFLICT"),
             Self::BusinessRuleViolation(_) => {
@@ -85,12 +92,12 @@ impl AppError {
             Self::TokenExpired => "Access token has expired. Please refresh.".to_string(),
             Self::InvalidCredentials => "Invalid email or password.".to_string(),
             Self::Forbidden(msg) => msg.clone(),
+            // Fixed text: never reflect the env value or any internal state.
+            Self::RegistrationDisabled => "Registration is disabled on this server.".to_string(),
             Self::NotFound(msg) => msg.clone(),
             Self::Conflict(msg) => msg.clone(),
             Self::BusinessRuleViolation(msg) => msg.clone(),
-            Self::RateLimited => {
-                "Too many requests. Please wait and try again.".to_string()
-            }
+            Self::RateLimited => "Too many requests. Please wait and try again.".to_string(),
             // Never leak internal error details to the client.
             Self::Internal(_) => "An unexpected error occurred.".to_string(),
         }
@@ -108,10 +115,7 @@ impl IntoResponse for AppError {
         }
 
         let body = ErrorBody {
-            error: ErrorDetail {
-                code,
-                message,
-            },
+            error: ErrorDetail { code, message },
         };
 
         (status, Json(body)).into_response()

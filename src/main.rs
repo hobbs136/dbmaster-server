@@ -90,7 +90,9 @@ async fn main() -> anyhow::Result<()> {
                 // dbmaster_core=info: config.rs boot WARNs (insecure dev-secret
                 // fallback, out-of-range env knobs) must reach the operator —
                 // without this they'd be silently filtered out.
-                .unwrap_or_else(|_| "dbmaster_server=info,dbmaster_core=info,tower_http=info".into()),
+                .unwrap_or_else(|_| {
+                    "dbmaster_server=info,dbmaster_core=info,tower_http=info".into()
+                }),
         )
         .init();
 
@@ -120,6 +122,23 @@ async fn run_normal() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     tracing::info!("Starting dbmaster-server v{}", env!("CARGO_PKG_VERSION"));
 
+    // S-5 — one-shot exposure WARN: registration open + non-loopback bind +
+    // non-dev mode means anyone who reaches the server can register an
+    // account and see every registered connection (single-team shared-instance
+    // semantics). Emitted once at boot, before any DB work.
+    let dev_mode = matches!(std::env::var(DEV_MODE_ENV).as_deref(), Ok("1"));
+    if registration_exposure_warn(config.registration_enabled, &config.host, dev_mode) {
+        tracing::warn!(
+            host = %config.host,
+            "public registration is ENABLED: anyone who can reach {} can register an \
+             account and see/use every registered connection (single-team shared-instance \
+             semantics — no per-user connection isolation). After creating the initial \
+             account, disable with DBMASTER_REGISTRATION_ENABLED=0 — see the README \
+             'Multi-user semantics & connection sharing' section",
+            config.host
+        );
+    }
+
     // CHANGE: ADR-0001 §4.8 D8.1 — load credential key (env var, fail-fast in prod).
     let credential_key = load_credential_key()?;
     log_key_fingerprint(&credential_key);
@@ -131,11 +150,8 @@ async fn run_normal() -> anyhow::Result<()> {
 
     // CHANGE: ADR-0001 §4.8 D8.3 — one-shot migration of legacy enc: rows to v1.
     // Idempotent; logs only row counts (no plaintext/ciphertext ever logged).
-    let migrated = dbmaster_automation::credential::migrate_legacy_credentials(
-        &pool,
-        &credential_key,
-    )
-    .await?;
+    let migrated =
+        dbmaster_automation::credential::migrate_legacy_credentials(&pool, &credential_key).await?;
     if migrated > 0 {
         tracing::info!("migrated {} legacy credential rows to v1", migrated);
     }
@@ -190,7 +206,9 @@ async fn run_normal() -> anyhow::Result<()> {
     // a gated install has no schedulers. All three share a single scheduler
     // AppState (they're stateless apart from the runner Arcs + pool).
     let (drift_sched, data_sync_sched, health_check_sched) = if entitlement.is_gated() {
-        tracing::info!("entitlement gated; drift + data_sync + health_check schedulers not started");
+        tracing::info!(
+            "entitlement gated; drift + data_sync + health_check schedulers not started"
+        );
         (None, None, None)
     } else {
         // One shared scheduler AppState — each spawn_scheduler clones it.
@@ -205,9 +223,18 @@ async fn run_normal() -> anyhow::Result<()> {
             health_check_runner.clone(),
         );
         (
-            Some(dbmaster_drift::spawn_scheduler(pool.clone(), sched_state.clone())),
-            Some(dbmaster_data_sync::spawn_scheduler(pool.clone(), sched_state.clone())),
-            Some(dbmaster_health_check::spawn_scheduler(pool.clone(), sched_state)),
+            Some(dbmaster_drift::spawn_scheduler(
+                pool.clone(),
+                sched_state.clone(),
+            )),
+            Some(dbmaster_data_sync::spawn_scheduler(
+                pool.clone(),
+                sched_state.clone(),
+            )),
+            Some(dbmaster_health_check::spawn_scheduler(
+                pool.clone(),
+                sched_state,
+            )),
         )
     };
 
@@ -217,10 +244,7 @@ async fn run_normal() -> anyhow::Result<()> {
     if !entitlement.is_gated() {
         dbmaster_automation::report_writer::spawn_weekly(pool.clone());
         // reports-M3（#29）— 原生慢查源采集（每小时；同门）。
-        dbmaster_automation::native_collector::spawn_collector(
-            pool.clone(),
-            credential_key,
-        );
+        dbmaster_automation::native_collector::spawn_collector(pool.clone(), credential_key);
     }
 
     // Bind and serve
@@ -229,10 +253,7 @@ async fn run_normal() -> anyhow::Result<()> {
 
     // reports-M1（#29）— 慢查询 retention 轮转（无条件启动——housekeeping 非
     // 付费功能，不挂 entitlement 门；handle detach，进程退出即止）。
-    dbmaster_automation::query_stats::spawn_cleanup(
-        pool.clone(),
-        config.slow_query_retention_days,
-    );
+    dbmaster_automation::query_stats::spawn_cleanup(pool.clone(), config.slow_query_retention_days);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     let server = axum::serve(listener, app);
@@ -257,6 +278,18 @@ async fn run_normal() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── Registration exposure WARN (audit S-5) ──
+
+/// Pure predicate for the one-shot boot WARN: emit only when public
+/// registration is enabled AND the bind address is reachable beyond this host
+/// AND dev mode is off. Loopback binds (`127.0.0.1`, `localhost`, `::1`) are
+/// local-only; dev mode is a local-development escape hatch. Pure so the
+/// seven-state matrix below is unit-testable without env or network.
+fn registration_exposure_warn(registration_enabled: bool, host: &str, dev_mode: bool) -> bool {
+    const LOOPBACK: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
+    registration_enabled && !LOOPBACK.contains(&host) && !dev_mode
+}
+
 // ── Embedded startup (ADR-0003 S2) ──
 
 /// Embedded-mode startup (ADR-0003 S2).
@@ -275,7 +308,10 @@ async fn run_normal() -> anyhow::Result<()> {
 ///   but NOT the drift scheduler (drift is a remote/team feature).
 /// - Shuts down on stdin EOF (parent gone), ctrl_c, or server error.
 async fn run_embedded(data_dir_override: Option<PathBuf>) -> anyhow::Result<()> {
-    tracing::info!("Starting dbmaster-server v{} (EMBEDDED mode)", env!("CARGO_PKG_VERSION"));
+    tracing::info!(
+        "Starting dbmaster-server v{} (EMBEDDED mode)",
+        env!("CARGO_PKG_VERSION")
+    );
 
     // ── Data dir: per-process temp dir unless overridden ──
     // Default under OS temp + process id so two embedded instances launched
@@ -304,6 +340,9 @@ async fn run_embedded(data_dir_override: Option<PathBuf>) -> anyhow::Result<()> 
         jwt_secret,
         jwt_refresh_secret,
         database_url: database_url.clone(),
+        // S-5 — embedded is always open: it never serves public registration
+        // (the user is bootstrapped programmatically) and binds loopback only.
+        registration_enabled: true,
         funnel_lite_enabled: true,
         drift_default_interval_mins: 30,
         drift_webhook_timeout_secs: 10,
@@ -345,8 +384,7 @@ async fn run_embedded(data_dir_override: Option<PathBuf>) -> anyhow::Result<()> 
     // 迁移 checksum 漂移（历史构建行尾差异，2026-08-25 实锤）→ embedded 模式
     // 允许一次性备份 + 重建（本地可再生数据）；远程模式（上方 :97）仍硬失败。
     // rebuilt 标志由本 target 落 WARN（默认 filter 不含 dbmaster_core）。
-    let (pool, db_rebuilt) =
-        db::init_pool_with_embedded_rebuild(&database_url, &db_path).await?;
+    let (pool, db_rebuilt) = db::init_pool_with_embedded_rebuild(&database_url, &db_path).await?;
     if db_rebuilt {
         tracing::warn!(
             "embedded database was rebuilt after migration failure (old files kept as .bak-*)"
@@ -355,20 +393,14 @@ async fn run_embedded(data_dir_override: Option<PathBuf>) -> anyhow::Result<()> 
     tracing::info!("embedded database initialized");
 
     // reports-M1（#29）— 慢查询 retention 轮转（embedded 是本功能主场景）。
-    dbmaster_automation::query_stats::spawn_cleanup(
-        pool.clone(),
-        config.slow_query_retention_days,
-    );
+    dbmaster_automation::query_stats::spawn_cleanup(pool.clone(), config.slow_query_retention_days);
 
     // reports-M2（#29）— 周报 ticker：embedded 合成 Licensed，无条件启动。
     dbmaster_automation::report_writer::spawn_weekly(pool.clone());
 
     // reports-M3（#29）— 原生慢查源采集（每小时；embedded 主场景同跑——
     // 桌面用户注册的 Redis/MySQL 连接即得整库慢查画像）。
-    dbmaster_automation::native_collector::spawn_collector(
-        pool.clone(),
-        credential_key,
-    );
+    dbmaster_automation::native_collector::spawn_collector(pool.clone(), credential_key);
 
     // ── install_uuid (same source as normal mode) ──
     let install_uuid = dbmaster_license::get_install_uuid(&pool).await?;
@@ -664,10 +696,9 @@ fn load_credential_key() -> anyhow::Result<[u8; 32]> {
             let raw = raw.trim();
             let bytes = hex::decode(raw)
                 .map_err(|e| anyhow::anyhow!("{CREDENTIAL_KEY_ENV}: invalid hex ({e})"))?;
-            let arr: [u8; 32] = bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("{CREDENTIAL_KEY_ENV}: must be 32 bytes (64 hex chars)"))?;
+            let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+                anyhow::anyhow!("{CREDENTIAL_KEY_ENV}: must be 32 bytes (64 hex chars)")
+            })?;
             Ok(arr)
         }
         Err(_) => {
@@ -706,7 +737,10 @@ fn log_key_fingerprint(key: &[u8; 32]) {
 fn log_entitlement(state: &EntitlementState) {
     use dbmaster_license::RenewalTier;
     match state {
-        EntitlementState::Licensed { license, expires_at } => {
+        EntitlementState::Licensed {
+            license,
+            expires_at,
+        } => {
             // DEFENSIVE-NOTE: do NOT log `license.email` (PII). Only type + expiry.
             tracing::info!(
                 license_type = %license.license_type,
@@ -727,7 +761,11 @@ fn log_entitlement(state: &EntitlementState) {
             RenewalTier::Urgent => "urgent",
         };
         let days = state.days_until_expiry().unwrap_or(0);
-        tracing::warn!(tier = tier_str, days_until_expiry = days, "renewal banner active");
+        tracing::warn!(
+            tier = tier_str,
+            days_until_expiry = days,
+            "renewal banner active"
+        );
     }
 }
 
@@ -750,5 +788,28 @@ mod banner_tests {
     #[test]
     fn version_display_starts_with_pkg_version() {
         assert!(VERSION_DISPLAY.starts_with(env!("CARGO_PKG_VERSION")));
+    }
+}
+
+#[cfg(test)]
+mod registration_exposure_warn_tests {
+    use super::registration_exposure_warn;
+
+    // S-5 — seven-state matrix: the WARN fires only for registration open +
+    // non-loopback bind + non-dev mode.
+    #[test]
+    fn warn_matrix() {
+        // Public bind + registration open + non-dev → WARN.
+        assert!(registration_exposure_warn(true, "0.0.0.0", false));
+        // Loopback binds (v4 / hostname / v6) → local-only, no WARN.
+        assert!(!registration_exposure_warn(true, "127.0.0.1", false));
+        assert!(!registration_exposure_warn(true, "localhost", false));
+        assert!(!registration_exposure_warn(true, "::1", false));
+        // LAN bind → reachable beyond the host → WARN.
+        assert!(registration_exposure_warn(true, "192.168.1.10", false));
+        // Registration disabled → nothing to warn about.
+        assert!(!registration_exposure_warn(false, "0.0.0.0", false));
+        // Dev mode → local development, no WARN.
+        assert!(!registration_exposure_warn(true, "0.0.0.0", true));
     }
 }

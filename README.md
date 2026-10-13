@@ -168,6 +168,7 @@ All dependencies are pure-Rust (sqlx with `runtime-tokio` + `sqlite`, no OpenSSL
 | `DATABASE_URL` | `sqlite:dbmaster.db?mode=rwc` | SQLite path (`sqlite::memory:` for tests) |
 | `RUST_LOG` | `dbmaster_server=info,dbmaster_core=info` | Log filter (`dbmaster_core` carries config boot WARNs, e.g. the insecure dev-secret fallback) |
 | `DBMASTER_CREDENTIAL_KEY` | none (dev: random per-boot) | 32-byte AES-256-GCM master key (hex) encrypting stored DB credentials — **required in production** (server fails fast if unset). |
+| `DBMASTER_REGISTRATION_ENABLED` | `true` | Public self-service registration switch. `0`/`false`/`off`/`no` (case-insensitive) disables `POST /api/auth/register` — it returns 403 `REGISTRATION_DISABLED` **before** validation/duplicate checks, so email existence is not leaked. Any unrecognized value also disables (fail-closed: a typo must never silently re-open registration on a public deployment). Default `true` because registration is the only account-creation path in normal mode (no seed user, no CLI bootstrap; embedded mode creates its user programmatically). While disabled there is **no built-in way to create accounts** — temporarily re-enable to add someone, then disable again. Takes effect on restart. See [Multi-user semantics & connection sharing](#multi-user-semantics--connection-sharing). |
 | `DBMASTER_DRIFT_DEFAULT_INTERVAL_MINS` | `30` | Default per-task drift-watch scan interval in minutes. Each task may override via its `config.interval_minutes`. Clamped to `1..=1440` (1 minute to 24 hours); out-of-range or unparseable values fall back to the default with a WARN log. |
 | `DBMASTER_DRIFT_WEBHOOK_TIMEOUT_SECS` | `10` | Per-HTTP-request timeout for drift webhook delivery. Each delivery still receives the full retry schedule. |
 | `DBMASTER_DEV` | unset | Set to `1` to enable dev mode: permits `http://localhost` / `http://127.0.0.1` / `http://[::1]` webhook URLs (loopback only), enables the insecure dev JWT secret defaults, and enables the ephemeral credential key. Production mode refuses non-`https://` webhook URLs and refuses to boot without the JWT secrets / credential key. |
@@ -186,6 +187,18 @@ All dependencies are pure-Rust (sqlx with `runtime-tokio` + `sqlite`, no OpenSSL
 | `DBMASTER_SLOW_QUERY_STORE_SQL` | `true` | Plaintext SQL storage (dual-track: the normalized digest is always stored). `0` stores digests only — `sql_text` stays NULL in the table and absent from every API response. |
 | `DBMASTER_SLOW_QUERY_RETENTION_DAYS` | `14` | Retention window: an hourly background task deletes `query_stats` rows older than this (runs unconditionally in both remote and embedded modes — bounded growth). Clamped `1..=365`. |
 | `DBMASTER_SLOW_QUERY_CAP_PER_DIGEST_PER_HOUR` | `20` | Per-digest sampling cap (sliding hour, in-memory — resets on restart; retention is the hard bound). Clamped `1..=10000`. All slow-query knobs take effect on restart (env-sourced config; the only runtime-swappable server state is the license entitlement). |
+
+---
+
+## Multi-user semantics & connection sharing
+
+dbmaster-server is built for **one person or one small team sharing a single self-hosted instance**, and that shapes its authorization model:
+
+- **Every registered connection is visible and usable by every authenticated user.** Any account on the instance can see and use **all** connections registered by any other account — including the vault-encrypted database credentials — through the REST API, the DB gateway, and the MCP tool surface. There is no per-user or per-workspace connection isolation, and an empty `DBMASTER_MCP_ALLOWED_CONNECTIONS` whitelist means MCP sees the full connection list too. For a trusted team this is the intended shared-instance design, not an oversight.
+- **Read this before exposing the server to a public or untrusted network.** `POST /api/auth/register` is open by default (it is the only account-creation path in normal mode), and anyone who can register can see every registered connection. Once your initial account exists, set `DBMASTER_REGISTRATION_ENABLED=0` and restart — registration then returns 403 `REGISTRATION_DISABLED`. Pair the switch with network-layer isolation (VPN / firewall / reverse-proxy with authentication) as appropriate.
+- **With registration disabled there is no API path to create new accounts** (by design — there is no admin bootstrap endpoint or CLI). To add someone later, temporarily re-enable the endpoint, register the account, then disable it again.
+
+> **Embedded mode** (desktop child process) is unaffected by this switch: it binds `127.0.0.1` only and creates its single user programmatically, never via the register endpoint.
 
 ---
 
@@ -221,7 +234,7 @@ Errors use `{"error":{"code","message"}}` with a stable code set (`NOT_FOUND`/`U
 Core REST surface quick map:
 
 - `GET /api/health` — no auth
-- `POST /api/auth/register|login|refresh` — no auth, **rate-limited 5 req/min per IP (shared counter)**
+- `POST /api/auth/register|login|refresh` — no auth, **rate-limited 5 req/min per IP (shared counter)**. Register is open by default; with `DBMASTER_REGISTRATION_ENABLED=0` it returns 403 `REGISTRATION_DISABLED` — see [Multi-user semantics & connection sharing](#multi-user-semantics--connection-sharing)
 - `GET|PATCH /api/me` — Bearer token
 - `GET|POST /api/workspaces`, `GET|DELETE /api/workspaces/:id`, `POST .../join|leave`, `DELETE .../members/:uid` — Bearer token
 

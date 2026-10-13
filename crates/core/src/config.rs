@@ -25,6 +25,16 @@ pub struct Config {
     pub jwt_refresh_secret: String,
     /// SQLite database URL (e.g. "sqlite:dbmaster.db" or "sqlite::memory:").
     pub database_url: String,
+    /// Public self-service registration switch (audit S-5):
+    /// `DBMASTER_REGISTRATION_ENABLED`. Defaults to **true** for
+    /// compatibility — registration is the only account-creation path in
+    /// normal mode (migrations seed no user and there is no CLI bootstrap).
+    /// Any unrecognized value fails CLOSED (`parse_bool_env` accepts only
+    /// `1/true/yes/on`, case-insensitive): a typo on a public deployment
+    /// must disable registration, never silently re-open it. Embedded mode
+    /// hardcodes this to `true` — it binds loopback only and creates its
+    /// single user programmatically, never via the endpoint.
+    pub registration_enabled: bool,
     // CHANGE: telemetry-funnel-plan.md D5 — funnel-lite kill switch. Defaults
     // ON; flip off via `DBMASTER_FUNNEL_LITE_ENABLED=0`. Surfaced via
     // /api/health (architect ratification of D5 placement is pending —
@@ -133,6 +143,10 @@ impl Config {
             )?,
             database_url: std::env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "sqlite:dbmaster.db?mode=rwc".to_string()),
+            // S-5 — public-registration kill switch. Default open (the only
+            // normal-mode account-creation path); unrecognized values fail
+            // closed per the field docs above.
+            registration_enabled: parse_bool_env("DBMASTER_REGISTRATION_ENABLED", true),
             // CHANGE: telemetry-funnel-plan.md D5 — env-controlled funnel-lite flag.
             funnel_lite_enabled: parse_bool_env("DBMASTER_FUNNEL_LITE_ENABLED", true),
             // CHANGE: ADR-0002 §4 D7 — drift scheduler interval (minutes).
@@ -145,10 +159,7 @@ impl Config {
                 1440,
             ),
             // CHANGE: ADR-0002 §4.4.2 — webhook per-request timeout (seconds).
-            drift_webhook_timeout_secs: parse_u64_env(
-                "DBMASTER_DRIFT_WEBHOOK_TIMEOUT_SECS",
-                10,
-            ),
+            drift_webhook_timeout_secs: parse_u64_env("DBMASTER_DRIFT_WEBHOOK_TIMEOUT_SECS", 10),
             // CHANGE: data-sync 一期 — batch size default 10000 rows/batch
             // (balances source-DB pressure vs round-trips for a 3000M-row
             // main table). Concurrency is serial in v1 (max_concurrency=1);
@@ -287,7 +298,10 @@ fn parse_interval_env(key: &str, default: u32, min: u32, max: u32) -> u32 {
             Ok(v) if v >= min && v <= max => v,
             Ok(v) => {
                 tracing::warn!(
-                    key, value = v, min, max,
+                    key,
+                    value = v,
+                    min,
+                    max,
                     "env var out of range; falling back to default"
                 );
                 default
@@ -361,6 +375,47 @@ mod tests {
         std::env::remove_var("DBMASTER_TEST_BOOL_UNKNOWN");
     }
 
+    // S-5 — DBMASTER_REGISTRATION_ENABLED value matrix. The REAL var name is
+    // only ever removed/read here, never set: parallel tests share the process
+    // environment, so setting it would race with every Config::from_env()-based
+    // test in the same binary (same rule that split the DBMASTER_TEST_BOOL_*
+    // names). The recognized/garbage values are driven through unique scratch
+    // names instead; the unset case pins the actual binding read-only.
+    #[test]
+    fn registration_enabled_env_matrix() {
+        // Unset → default true (open): registration is the only account-creation
+        // path in normal mode, so the compatible default keeps fresh boots working.
+        std::env::remove_var("DBMASTER_REGISTRATION_ENABLED");
+        assert!(parse_bool_env("DBMASTER_REGISTRATION_ENABLED", true));
+
+        // Recognized falsy values disable.
+        for v in ["0", "false", "off", "no"] {
+            std::env::set_var("DBMASTER_TEST_REG_FALSY", v);
+            assert!(
+                !parse_bool_env("DBMASTER_TEST_REG_FALSY", true),
+                "{v} should disable registration"
+            );
+        }
+        std::env::remove_var("DBMASTER_TEST_REG_FALSY");
+
+        // Recognized truthy values (case-insensitive) keep it open.
+        for v in ["1", "true", "TRUE", "Yes"] {
+            std::env::set_var("DBMASTER_TEST_REG_TRUTHY", v);
+            assert!(
+                parse_bool_env("DBMASTER_TEST_REG_TRUTHY", true),
+                "{v} should keep registration enabled"
+            );
+        }
+        std::env::remove_var("DBMASTER_TEST_REG_TRUTHY");
+
+        // Garbage fails CLOSED: with a positive `_ENABLED` flag name, an
+        // unrecognized value must disable registration — a typo on a public
+        // deployment must never silently re-open the endpoint.
+        std::env::set_var("DBMASTER_TEST_REG_GARBAGE", "enabled?");
+        assert!(!parse_bool_env("DBMASTER_TEST_REG_GARBAGE", true));
+        std::env::remove_var("DBMASTER_TEST_REG_GARBAGE");
+    }
+
     // CHANGE: ADR-0002 Phase E — env parsers for drift config. Each test uses
     // a UNIQUE env var name so parallel test execution can't race (the lesson
     // of the parse_bool_env_* tests above where two tests share one var name).
@@ -368,35 +423,53 @@ mod tests {
     #[test]
     fn parse_interval_env_returns_default_when_unset() {
         // Unique var per assertion → no race with sibling tests.
-        assert_eq!(parse_interval_env("DBMASTER_TEST_INTERVAL_UNSET_1", 30, 1, 1440), 30);
-        assert_eq!(parse_interval_env("DBMASTER_TEST_INTERVAL_UNSET_2", 7, 1, 1440), 7);
+        assert_eq!(
+            parse_interval_env("DBMASTER_TEST_INTERVAL_UNSET_1", 30, 1, 1440),
+            30
+        );
+        assert_eq!(
+            parse_interval_env("DBMASTER_TEST_INTERVAL_UNSET_2", 7, 1, 1440),
+            7
+        );
     }
 
     #[test]
     fn parse_interval_env_clamps_below_min() {
         std::env::set_var("DBMASTER_TEST_INTERVAL_LO", "0");
-        assert_eq!(parse_interval_env("DBMASTER_TEST_INTERVAL_LO", 30, 1, 1440), 30);
+        assert_eq!(
+            parse_interval_env("DBMASTER_TEST_INTERVAL_LO", 30, 1, 1440),
+            30
+        );
         std::env::remove_var("DBMASTER_TEST_INTERVAL_LO");
     }
 
     #[test]
     fn parse_interval_env_clamps_above_max() {
         std::env::set_var("DBMASTER_TEST_INTERVAL_HI", "99999");
-        assert_eq!(parse_interval_env("DBMASTER_TEST_INTERVAL_HI", 30, 1, 1440), 30);
+        assert_eq!(
+            parse_interval_env("DBMASTER_TEST_INTERVAL_HI", 30, 1, 1440),
+            30
+        );
         std::env::remove_var("DBMASTER_TEST_INTERVAL_HI");
     }
 
     #[test]
     fn parse_interval_env_accepts_in_range() {
         std::env::set_var("DBMASTER_TEST_INTERVAL_OK", "15");
-        assert_eq!(parse_interval_env("DBMASTER_TEST_INTERVAL_OK", 30, 1, 1440), 15);
+        assert_eq!(
+            parse_interval_env("DBMASTER_TEST_INTERVAL_OK", 30, 1, 1440),
+            15
+        );
         std::env::remove_var("DBMASTER_TEST_INTERVAL_OK");
     }
 
     #[test]
     fn parse_interval_env_rejects_garbage() {
         std::env::set_var("DBMASTER_TEST_INTERVAL_GARBAGE", "soon");
-        assert_eq!(parse_interval_env("DBMASTER_TEST_INTERVAL_GARBAGE", 30, 1, 1440), 30);
+        assert_eq!(
+            parse_interval_env("DBMASTER_TEST_INTERVAL_GARBAGE", 30, 1, 1440),
+            30
+        );
         std::env::remove_var("DBMASTER_TEST_INTERVAL_GARBAGE");
     }
 
@@ -424,7 +497,10 @@ mod tests {
     fn parse_list_env_splits_trims_and_drops_empty() {
         std::env::remove_var("DBMASTER_TEST_LIST_UNSET");
         assert!(parse_list_env("DBMASTER_TEST_LIST_UNSET").is_empty());
-        std::env::set_var("DBMASTER_TEST_LIST_SET", "localhost, 192.0.2.10:38080 ,,dbmaster.io");
+        std::env::set_var(
+            "DBMASTER_TEST_LIST_SET",
+            "localhost, 192.0.2.10:38080 ,,dbmaster.io",
+        );
         assert_eq!(
             parse_list_env("DBMASTER_TEST_LIST_SET"),
             vec!["localhost", "192.0.2.10:38080", "dbmaster.io"]
@@ -544,7 +620,10 @@ mod tests {
             msg.contains("DBMASTER_TEST_SECRET_MISSING"),
             "error must name the variable: {msg}"
         );
-        assert!(msg.contains("DBMASTER_DEV"), "error must name the escape hatch: {msg}");
+        assert!(
+            msg.contains("DBMASTER_DEV"),
+            "error must name the escape hatch: {msg}"
+        );
         assert!(
             !msg.contains("dev-default") && !msg.contains("real-secret-value"),
             "error must not echo any secret-ish value: {msg}"

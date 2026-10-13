@@ -24,13 +24,15 @@ pub use tools::EntitlementArc;
 
 use std::sync::Arc;
 
-use axum::{middleware, routing::{delete, post}, Router};
+use axum::{
+    middleware,
+    routing::{delete, post},
+    Router,
+};
 use dbmaster_core::config::Config;
 use dbmaster_core::server::CredentialKey;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
-use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService,
-};
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use sqlx::SqlitePool;
 
 /// MCP 端点路径（Streamable HTTP：POST=消息，GET=SSE 流，DELETE=会话结束）。
@@ -99,15 +101,11 @@ pub fn router(
 
     let config_for_extensions = config;
     let management = Router::new()
-        .route(
-            "/api/mcp/tokens",
-            post(tokens::create).get(tokens::list),
-        )
+        .route("/api/mcp/tokens", post(tokens::create).get(tokens::list))
         .route("/api/mcp/tokens/:id", delete(tokens::revoke))
         .with_state(tokens::TokensState { pool })
         .layer(middleware::from_fn(
-            move |mut req: axum::http::Request<axum::body::Body>,
-                  next: middleware::Next| {
+            move |mut req: axum::http::Request<axum::body::Body>, next: middleware::Next| {
                 let cfg = config_for_extensions.clone();
                 async move {
                     req.extensions_mut().insert(cfg);
@@ -150,6 +148,7 @@ mod tests {
             jwt_secret: "test-mcp-jwt-secret".into(),
             jwt_refresh_secret: "test-mcp-refresh-secret".into(),
             database_url: "sqlite::memory:".into(),
+            registration_enabled: true,
             funnel_lite_enabled: false,
             drift_default_interval_mins: 30,
             drift_webhook_timeout_secs: 10,
@@ -175,7 +174,9 @@ mod tests {
     }
 
     pub(crate) async fn test_pool() -> SqlitePool {
-        let pool = SqlitePool::connect("sqlite::memory:").await.expect("test pool");
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("test pool");
         sqlx::query(
             // 与 migrations 011+013 对齐（tool 列 T06 起 tool_call 行使用）。
             "CREATE TABLE mcp_audit (
