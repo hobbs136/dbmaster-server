@@ -257,11 +257,14 @@ fn json_value_to_bson(v: &Value) -> Result<Bson, String> {
 }
 
 /// 扩展 JSON 入向反解（与出向 `bson_to_json` 对称）：`{$oid}`/`{$date}`/
-/// `{$numberDecimal}` 单键子文档还原为原生 BSON 类型——`{'_id': {'$oid':…}}`
-/// 查询与 Date 值写入是客户端高频用法（测试/AI 导入直传 DateTime → 壳预
-/// 编码为 `$date`）。其余子文档按普通 Document 通过；畸形值（非法 hex/
-/// 非法日期/非单键）同样放行为普通 Document（宽松语义，与 mongo shell 的
-/// 严格模式不同——宽松失败面小）。
+/// `{$numberDecimal}`/`{$binary}` 单键子文档还原为原生 BSON 类型——
+/// `{'_id': {'$oid':…}}` 查询与 Date 值写入是客户端高频用法（测试/AI 导入
+/// 直传 DateTime → 壳预编码为 `$date`）；`$binary` 让 GridFS chunk data 等
+/// 二进制写入落库为真 BinData（与出向 Binary 臂对称：STANDARD base64 +
+/// 两位小写 hex subType，mongofiles/第三方驱动方可读）。其余子文档按普通
+/// Document 通过；畸形值（非法 hex/非法日期/非单键/非法 base64）同样放行
+/// 为普通 Document（宽松语义，与 mongo shell 的严格模式不同——宽松失败
+/// 面小）。
 fn extended_json_to_bson(map: &serde_json::Map<String, Value>) -> Option<Bson> {
     if map.len() != 1 {
         return None;
@@ -293,6 +296,22 @@ fn extended_json_to_bson(map: &serde_json::Map<String, Value>) -> Option<Bson> {
             return Some(Bson::Decimal128(d));
         }
         return None;
+    }
+    // {$binary: {base64, subType}} → BSON Binary（与出向 bson_to_json 的
+    // Binary 臂对称；subType 两位 hex → BinarySubtype，畸形放行为普通
+    // Document——宽松语义与 $oid/$date/$numberDecimal 分支一致；legacy
+    // 双键 $type 形态被上方单键检查天然放行，不做支持）。
+    if let Some(b) = map.get("$binary") {
+        use base64::Engine;
+        let inner = b.as_object()?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(inner.get("base64")?.as_str()?)
+            .ok()?;
+        let sub = u8::from_str_radix(inner.get("subType")?.as_str()?, 16).ok()?;
+        return Some(Bson::Binary(bson::Binary {
+            subtype: bson::spec::BinarySubtype::from(sub),
+            bytes,
+        }));
     }
     None
 }
@@ -423,15 +442,25 @@ struct CursorState {
     buf: std::vec::IntoIter<Document>,
 }
 
-/// 游标文档流：缓冲耗尽且 id ≠ 0 时发 getMore（coll 取自 ns 后缀）。
-/// 错误只吐一次（吐后置 id=0 终结）。
+/// ns（"db.coll"，coll 可含点，如 "db.media.chunks"）→ 集合名
+/// （首个 `.` 后完整余段）。getMore 的 db 由调用方持有
+/// （cursor_stream 的 db 参数），ns 仅用于取 coll。无点 ns → 空
+/// （不可达防御路径：ns 来自服务端 cursor 响应，恒为 "db.coll" 形态）。
+fn ns_to_coll(ns: &str) -> String {
+    ns.split_once('.').map(|(_, coll)| coll.to_string()).unwrap_or_default()
+}
+
+/// 游标文档流：缓冲耗尽且 id ≠ 0 时发 getMore（coll 取自 ns 首个 `.` 后
+/// 余段——带点集合名如 `db.media.chunks` 须整体取 `media.chunks`，取末段
+/// 会路由到错误 namespace → Unauthorized）。错误只吐一次（吐后置 id=0
+/// 终结）。
 pub(crate) fn cursor_stream(
     db: mongodb::Database,
     first_batch: Vec<Document>,
     cursor_id: i64,
     ns: &str,
 ) -> impl futures::Stream<Item = Result<Document, mongodb::error::Error>> {
-    let coll = ns.rsplit('.').next().unwrap_or_default().to_string();
+    let coll = ns_to_coll(ns);
     futures::stream::unfold(
         CursorState { db, id: cursor_id, coll, buf: first_batch.into_iter() },
         |mut st| async move {
@@ -616,6 +645,19 @@ mod tests {
     }
 
     #[test]
+    fn ns_to_coll_takes_full_remainder_after_first_dot() {
+        // 行为对照（#14）：带点集合名须整体取余段，取末段会路由到错误
+        // namespace → Unauthorized。
+        assert_eq!(ns_to_coll("db.media.chunks"), "media.chunks");
+        assert_eq!(ns_to_coll("db.coll"), "coll"); // 常规 ns 行为不变
+        assert_eq!(ns_to_coll("db.a.b.c"), "a.b.c");
+        assert_eq!(ns_to_coll(""), "");
+        // 畸形 ns（实践中不可达，ns 来自服务端响应恒含点）：空 coll →
+        // cursor_stream 既有短路防御终结流。
+        assert_eq!(ns_to_coll("nodot"), "");
+    }
+
+    #[test]
     fn extended_json_input_restores_native_bson_types() {
         let doc = json_to_command_doc(&json!({
             "find": "c",
@@ -641,6 +683,67 @@ mod tests {
         let doc = json_to_command_doc(&json!({"f": {"$gt": 5}})).unwrap();
         let inner = doc.get_document("f").unwrap();
         assert_eq!(inner.get_i64("$gt").unwrap(), 5);
+    }
+
+    #[test]
+    fn binary_extended_json_input_restores_bson_binary() {
+        use base64::Engine;
+        use base64::engine::general_purpose::STANDARD;
+        // $binary 单键子文档 → 真 BSON Binary（GridFS chunk data 落库形态，
+        // #13：此前落库为普通子文档，mongofiles/第三方驱动不可读）。
+        let b64 = STANDARD.encode([1u8, 2, 3]);
+        let doc = json_to_command_doc(&json!({
+            "insert": "media.chunks",
+            "documents": [{"data": {"$binary": {"base64": b64.clone(), "subType": "00"}}}]
+        }))
+        .expect("valid command");
+        let docs = doc.get_array("documents").unwrap();
+        let Bson::Binary(bin) = docs[0].as_document().unwrap().get("data").unwrap() else {
+            panic!("expected Bson::Binary, got {:?}", docs[0]);
+        };
+        assert_eq!(bin.bytes, vec![1u8, 2, 3]);
+        assert_eq!(u8::from(bin.subtype), 0x00);
+
+        // subType 透传：u8 往返断言（非标准值入 crate 数值承载变体，
+        // 不断言变体名）。
+        let doc = json_to_command_doc(&json!({
+            "q": {"$binary": {"base64": b64.clone(), "subType": "80"}}
+        }))
+        .unwrap();
+        let Bson::Binary(fin) = doc.get("q").unwrap() else {
+            panic!("expected Bson::Binary, got {:?}", doc.get("q"));
+        };
+        assert_eq!(u8::from(fin.subtype), 0x80);
+
+        // 对称性：bson_to_json(反解结果) == 输入 JSON（subType 两位小写 hex）。
+        let input = json!({"$binary": {"base64": b64, "subType": "00"}});
+        let parsed = extended_json_to_bson(input.as_object().unwrap()).unwrap();
+        assert_eq!(bson_to_json(parsed), input);
+
+        // E4：inner 含多余键 → 宽松接受（读所需两键，忽略余键）。
+        let doc = json_to_command_doc(&json!({
+            "q": {"$binary": {"base64": "AQID", "subType": "00", "extra": 1}}
+        }))
+        .unwrap();
+        assert!(matches!(doc.get("q"), Some(Bson::Binary(_))));
+
+        // 畸形态一律放行为普通 Document（宽松语义，与 $oid 非法 hex 同型）：
+        // E1 非法 base64；E2 subType 缺失/非字符串/非法 hex；E3 $binary 值
+        // 非对象；E5 legacy 双键 $type 形态（单键检查天然放行，回归断言）。
+        for malformed in [
+            json!({"$binary": {"base64": "!!not-b64!!", "subType": "00"}}),
+            json!({"$binary": {"base64": "AQID"}}),
+            json!({"$binary": {"base64": "AQID", "subType": "zz"}}),
+            json!({"$binary": {"base64": "AQID", "subType": 7}}),
+            json!({"$binary": "not an object"}),
+            json!({"$binary": "AQID", "$type": "00"}),
+        ] {
+            let doc = json_to_command_doc(&json!({"q": malformed})).unwrap();
+            assert!(
+                matches!(doc.get("q"), Some(Bson::Document(_))),
+                "malformed {malformed:?} must fall back to plain Document"
+            );
+        }
     }
 
     #[test]
