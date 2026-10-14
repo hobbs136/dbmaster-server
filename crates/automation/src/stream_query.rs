@@ -33,10 +33,10 @@ use tokio_util::sync::CancellationToken;
 use crate::db_handler::{
     decode_cell_mysql, decode_cell_pg, decode_cell_sqlite, is_select_statement, is_show_statement,
     open_mysql_db,
-    open_pg_db, open_sqlite,
+    open_pg_db, open_sqlite, DbConnectionRow,
 };
 use crate::metadata::{load_connection, Family};
-use crate::sqlserver::{map_tds_row, open_sqlserver, tiberius_engine_code};
+use crate::sqlserver::{map_tds_row, open_sqlserver, tiberius_engine_code, SsStream};
 use dbmaster_core::server::CredentialKey;
 
 /// 每个 rows 事件装载的行数（批大小）。500 行/批在 SSE 帧大小与事件数
@@ -787,7 +787,9 @@ async fn run_inner(
             message: e.message,
             engine_code: None,
         })?;
-    let db_name = db.or(conn.default_database.as_deref());
+    // DDF — 库名回落解析（db.or(default_database)）与「stale 默认库无库
+    // 重试一次」自愈统一收口到 run_inner 下方的 open_*_resolving_stale_default
+    // helper；各分支不再共享 db_name。
     // 防御：0 行上限会把 truncated 判据退化成永真（read_query 同款）。
     let row_limit = row_limit.max(1);
     let deadline = tokio::time::Instant::now() + timeout;
@@ -795,9 +797,8 @@ async fn run_inner(
 
     match family {
         Family::MySql(profile) => {
-            let pool = open_mysql_db(&conn, &password, db_name)
-                .await
-                .map_err(|_| StreamQueryError::connect_failed())?;
+            // DDF — 带 stale 默认库自愈的 open（见 run_inner 下方 helper 区块）。
+            let pool = open_mysql_pool_resolving_stale_default(&conn, &password, db).await?;
             if is_select_statement(sql) {
                 // T21 — 执行模式经族 profile（原 doris 特判收敛为 hook）：
                 // Doris 的 MySQL 口不吃 PREPARE（T06 实机三坑）——raw_sql
@@ -832,9 +833,8 @@ async fn run_inner(
             }
         }
         Family::Postgres => {
-            let pool = open_pg_db(&conn, &password, db_name)
-                .await
-                .map_err(|_| StreamQueryError::connect_failed())?;
+            // DDF — 带 stale 默认库自愈的 open（回落失败落 postgres 维护库重试）。
+            let pool = open_pg_pool_resolving_stale_default(&conn, &password, db).await?;
             if is_select_statement(sql) {
                 stream_rows(
                     sqlx::query(sql).fetch(&pool)
@@ -886,9 +886,9 @@ async fn run_inner(
         // 等），非 CH 原生类型名（String/Decimal(10,2)）——原生名需查
         // system.columns 或走 HTTP 口，不在本批范围。
         Family::Clickhouse => {
-            let pool = open_mysql_db(&conn, &password, db_name)
-                .await
-                .map_err(|_| StreamQueryError::connect_failed())?;
+            // DDF — 与 MySQL 族共用同一自愈 helper（CH 经 MySQL 兼容口复用
+            // open_mysql_db，stale 默认库场景同族）。
+            let pool = open_mysql_pool_resolving_stale_default(&conn, &password, db).await?;
             if is_select_statement(sql) {
                 stream_rows(
                     sqlx::query(sql).fetch(&pool)
@@ -913,13 +913,15 @@ async fn run_inner(
         Family::SqlServer => {
             // 连接阶段也纳入 deadline（对死主机 TCP 连挂的保护；MySQL/PG
             // 族的 connect 在池层有 acquire 超时，这里显式包一层）。
+            // DDF — 整个带回退的 open 流程包在同一 timeout_at 内，总预算
+            // 不变：重试吃剩余 deadline；首试耗尽 deadline 即 TIMEOUT，
+            // 不额外重试。
             let mut client = tokio::time::timeout_at(
                 deadline,
-                open_sqlserver(&conn, &password, db_name),
+                open_sqlserver_resolving_stale_default(&conn, &password, db),
             )
             .await
-            .map_err(|_| StreamQueryError::timeout(timeout_secs))?
-            .map_err(|_| StreamQueryError::connect_failed())?;
+            .map_err(|_| StreamQueryError::timeout(timeout_secs))??;
             if is_select_statement(sql) {
                 // 单条语句直发（无参数拼接）；Metadata/Done 条目跳过——
                 // 列名取自首行，与 sqlx 路径同口径（空结果 meta 列为空数组）。
@@ -976,6 +978,103 @@ async fn run_inner(
                 .to_string(),
             engine_code: None,
         }),
+    }
+}
+
+// ── DDF（drop-db-disconnect-fix，2026-10-14）stale 默认库自愈 ──
+//
+// 根因：客户端未指定 database（wire 省略字段）时 run_inner 回落注册的
+// `default_database`；该库若已被删（用户 drop / 外部删库），open 失败被误报
+// 为 CONNECTION_FAILED（连接级），客户端壳据此撕掉整个会话——「删库成功但
+// 连接断开」。自愈策略：仅当「客户端未指定库 且 注册了默认库」（即失败发生
+// 在回落派生库上）时无库重试一次——MySQL 族/CH 不带 schema 直连，PG 落
+// postgres 维护库，SS 落 master。重试成功即正常执行；再失败维持原
+// CONNECTION_FAILED 语义（客户端可感知，仅多花一次 open）。
+// 铁律：显式 database 路由失败**永不重试**——不存在语句静默改打其它库的
+// 风险（重试仅触发于回落派生库 open 失败），客户端壳对显式库有自己的
+// stale 自愈。未注册默认库的连接行为与修复前逐字节一致。
+
+/// 是否符合「stale 默认库自愈」重试条件：客户端未指定 database（wire 省略；
+/// 壳侧请求体构造保证永不发送空串，此处对空串做防御性归一——wire 上空串 ≡
+/// 省略字段）且注册了 default_database（即失败发生在回落派生库上）。
+fn stale_default_retry_eligible(db: Option<&str>, default_database: Option<&str>) -> bool {
+    db.filter(|d| !d.is_empty()).is_none() && default_database.is_some()
+}
+
+/// MySQL 族与 ClickHouse 共用的带回退 open（CH 经 MySQL 兼容口复用
+/// open_mysql_db）：回落派生库 open 失败 → 不带 schema 重试一次
+/// （open_mysql_db 的 None 语义即不下发 database()）。
+async fn open_mysql_pool_resolving_stale_default(
+    conn: &DbConnectionRow,
+    password: &str,
+    db: Option<&str>,
+) -> Result<sqlx::Pool<sqlx::MySql>, StreamQueryError> {
+    let db_name = db.or(conn.default_database.as_deref());
+    match open_mysql_db(conn, password, db_name).await {
+        Ok(pool) => Ok(pool),
+        Err(_) if stale_default_retry_eligible(db, conn.default_database.as_deref()) => {
+            tracing::warn!(
+                default_database = ?conn.default_database,
+                "registered default_database unavailable (dropped?); retrying without database"
+            );
+            open_mysql_db(conn, password, None)
+                .await
+                .map_err(|_| StreamQueryError::connect_failed())
+        }
+        Err(_) => Err(StreamQueryError::connect_failed()),
+    }
+}
+
+/// PG 同款：回落派生库 open 失败 → 落 postgres 维护库重试一次
+/// （`open_pg_db(None)` 的既有 unwrap_or("postgres") 语义——与「未配置默认
+/// 库的 PG 连接」行为完全同构）。
+async fn open_pg_pool_resolving_stale_default(
+    conn: &DbConnectionRow,
+    password: &str,
+    db: Option<&str>,
+) -> Result<sqlx::Pool<sqlx::Postgres>, StreamQueryError> {
+    let db_name = db.or(conn.default_database.as_deref());
+    match open_pg_db(conn, password, db_name).await {
+        Ok(pool) => Ok(pool),
+        Err(_) if stale_default_retry_eligible(db, conn.default_database.as_deref()) => {
+            tracing::warn!(
+                default_database = ?conn.default_database,
+                "registered default_database unavailable (dropped?); retrying on postgres maintenance database"
+            );
+            open_pg_db(conn, password, None)
+                .await
+                .map_err(|_| StreamQueryError::connect_failed())
+        }
+        Err(_) => Err(StreamQueryError::connect_failed()),
+    }
+}
+
+/// SS 同款：回落派生库 open 失败 → 落 master 重试一次。调用方把整个带回退
+/// 的流程包进既有 `timeout_at(deadline, …)`——总预算不变（重试吃剩余
+/// deadline；首试耗尽 deadline 即 TIMEOUT，不额外重试）。
+///
+/// 重试目标库取 `master` 而非字面「登录默认库」：TDS 握手必有库上下文，
+/// `tds_config` 恒把 None/空串补成 default_database→master，既有
+/// `open_sqlserver` 签名无法表达「省略 database」（本批不改其签名）；master
+/// 恒存在且是登录默认库的事实标准。
+async fn open_sqlserver_resolving_stale_default(
+    conn: &DbConnectionRow,
+    password: &str,
+    db: Option<&str>,
+) -> Result<tiberius::Client<SsStream>, StreamQueryError> {
+    let db_name = db.or(conn.default_database.as_deref());
+    match open_sqlserver(conn, password, db_name).await {
+        Ok(client) => Ok(client),
+        Err(_) if stale_default_retry_eligible(db, conn.default_database.as_deref()) => {
+            tracing::warn!(
+                default_database = ?conn.default_database,
+                "registered default_database unavailable (dropped?); retrying on master"
+            );
+            open_sqlserver(conn, password, Some("master"))
+                .await
+                .map_err(|_| StreamQueryError::connect_failed())
+        }
+        Err(_) => Err(StreamQueryError::connect_failed()),
     }
 }
 
@@ -1153,5 +1252,29 @@ mod tests {
         assert_eq!(normalize_meta_code("QUERY_FAILED"), "DB_ERROR");
         assert_eq!(normalize_meta_code("NOT_FOUND"), "NOT_FOUND");
         assert_eq!(normalize_meta_code("UNSUPPORTED_DB_TYPE"), "UNSUPPORTED_DB_TYPE");
+    }
+
+    // SRV-DDF-001（DDF）：未注册默认库 → 不符合重试条件（该连接形态的行为
+    // 与修复前逐字节一致）。
+    #[test]
+    fn stale_default_retry_requires_registered_default() {
+        assert!(!stale_default_retry_eligible(None, None));
+    }
+
+    // SRV-DDF-002（DDF）：显式 database 路由失败 → 永不重试（语句不许静默
+    // 改打其它库；壳对显式库有自己的 stale 自愈）。
+    #[test]
+    fn stale_default_retry_rejects_explicit_database() {
+        assert!(!stale_default_retry_eligible(Some("x"), None));
+        assert!(!stale_default_retry_eligible(Some("x"), Some("y")));
+    }
+
+    // SRV-DDF-003（DDF）：未指定库 + 已注册默认库 → 符合重试条件；空串 db
+    // 防御性归一为「未指定」（wire 上空串 ≡ 省略字段）。
+    #[test]
+    fn stale_default_retry_matches_fallback_derived_open() {
+        assert!(stale_default_retry_eligible(None, Some("x")));
+        assert!(stale_default_retry_eligible(Some(""), Some("x")));
+        assert!(!stale_default_retry_eligible(Some(""), None));
     }
 }
