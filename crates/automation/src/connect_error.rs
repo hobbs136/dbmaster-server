@@ -10,6 +10,8 @@
 //! | [`TIMEOUT`] | 超时（驱动连接超时/池获取超时；复用 stream_query SSE 既有码） |
 //! | [`DB_ERROR`] | 其余失败（引擎错误、文件错误、未知），与 stream_query SSE
 //!   error 事件的 DB_ERROR 同码同义 |
+//! | [`SSL_HANDSHAKE`] | TLS/SSL 握手失败（证书校验/握手协议层失败；探针特征
+//!   见 `classify_io_parts`） |
 //!
 //! 判别收在 automation（gateway 是薄 HTTP 封装层、无驱动依赖；驱动错误
 //! 类型与既有判别件 mongo/redis_leg 仅本 crate 可见）。[`DraftTestError::code`]
@@ -27,6 +29,9 @@ pub const TIMEOUT: &str = "TIMEOUT";
 
 /// 其余失败（引擎错误、文件错误、未知）兜底码。
 pub const DB_ERROR: &str = "DB_ERROR";
+
+/// TLS/SSL 握手失败（证书校验/握手协议层失败；探针特征见 `classify_io_parts`）。
+pub const SSL_HANDSHAKE: &str = "SSL_HANDSHAKE";
 
 /// 草稿连接测试失败（`test_draft_connection` 的 Err 形态）：稳定码 +
 /// redact 后文案。`code` 只取上面的值域。
@@ -150,6 +155,13 @@ fn classify_io_parts(kind: std::io::ErrorKind, message: &str) -> &'static str {
             // Windows/macOS/Linux 同源构造点）。
             if message.contains("failed to lookup address information") {
                 UNREACHABLE
+            }
+            // rustls InvalidCertificate 家族统一前缀：sqlx tls-rustls 下证书校验
+            // 失败恒定形态 = io kind=InvalidData + "invalid peer certificate: <Cause>"
+            // （2026-10-27 WSL 探针实测：PG verify-full/verify-ca、MySQL
+            // verify-ca/verify-identity 四场景同形；判别不依赖 kind）。
+            else if message.contains("invalid peer certificate") {
+                SSL_HANDSHAKE
             } else {
                 DB_ERROR
             }
@@ -324,6 +336,74 @@ mod tests {
     fn untyped_message_defaults_to_db_error() {
         assert_eq!(
             classify_driver_error(&anyhow::Error::msg("engine error 855: boom")),
+            DB_ERROR
+        );
+    }
+
+    // ── SSL/TLS 握手（UI35-402，批4 T8 红测，B-05 冻结特征）──
+    // 探针实证来源：2026-10-27 WSL 实测（sqlx tls-rustls：PG 17 verify-full/
+    // verify-ca 与 MySQL 8 verify-ca/verify-identity 四场景恒定形态 =
+    // io kind=InvalidData + message "invalid peer certificate: <Cause>"，
+    // rustls InvalidCertificate 家族统一前缀）。
+    // 断言用字符串字面量——SSL_HANDSHAKE 常量由实现批新增，红测不得引用。
+
+    #[test]
+    fn io_invalid_peer_certificate_is_ssl_handshake() {
+        assert_eq!(
+            classify_io_parts(
+                std::io::ErrorKind::InvalidData,
+                "invalid peer certificate: UnknownIssuer"
+            ),
+            "SSL_HANDSHAKE"
+        );
+    }
+
+    #[test]
+    fn io_invalid_peer_certificate_expired_is_ssl_handshake() {
+        assert_eq!(
+            classify_io_parts(
+                std::io::ErrorKind::InvalidData,
+                "invalid peer certificate: CertExpired"
+            ),
+            "SSL_HANDSHAKE"
+        );
+    }
+
+    #[test]
+    fn io_invalid_peer_certificate_name_mismatch_is_ssl_handshake() {
+        assert_eq!(
+            classify_io_parts(
+                std::io::ErrorKind::InvalidData,
+                "invalid peer certificate: NotValidForName"
+            ),
+            "SSL_HANDSHAKE"
+        );
+    }
+
+    // 反例回归：既有判别行为不变（B-05 加性契约，旧码逐字节不变）。
+    #[test]
+    fn io_dns_prefix_still_unreachable() {
+        assert_eq!(
+            classify_io_parts(
+                std::io::ErrorKind::Other,
+                "failed to lookup address information: Name or service not known"
+            ),
+            UNREACHABLE
+        );
+    }
+
+    #[test]
+    fn io_timed_out_still_timeout() {
+        assert_eq!(
+            classify_io_parts(std::io::ErrorKind::TimedOut, "timed out"),
+            TIMEOUT
+        );
+    }
+
+    #[test]
+    fn io_without_ssl_feature_still_db_error() {
+        assert_eq!(
+            classify_io_parts(std::io::ErrorKind::Other, "some unrelated io failure"),
             DB_ERROR
         );
     }
